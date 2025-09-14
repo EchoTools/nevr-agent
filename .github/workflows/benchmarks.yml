@@ -1,0 +1,83 @@
+name: Run and Update Benchmarks
+
+on:
+  release:
+    types:
+      - created
+
+jobs:
+  bench:
+    if: github.event.release.draft == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+
+      - name: Run benchmarks
+        id: run_bench
+        run: |
+          mkdir -p bench-output
+          go test -bench=. -benchmem ./... > bench-output/bench.txt || true
+          cat bench-output/bench.txt
+
+      - name: Save benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output
+          path: bench-output/bench.txt
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          # find most recent tag before this release tag (if Git history has tags)
+          git fetch --tags
+          echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          prev=$(git tag --sort=-creatordate | grep -v "${{ github.event.release.tag_name }}" | sed -n '1p' || true)
+          echo "PREV_TAG=${prev}" >> $GITHUB_ENV
+          echo "Found previous tag: ${prev}"
+
+      - name: Download previous benchmarks (if available)
+        if: env.PREV_TAG != ''
+        run: |
+          echo "No automatic previous benchmark retrieval implemented; proceeding without baseline."
+
+      - name: Compare and update BENCHMARKS.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p tools
+          cat > tools/update_benchmarks.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          out=bench-output/bench.txt
+          md=BENCHMARKS.md
+
+          timestamp=$(date -u +"%Y-%m-%d %H:%M:%SZ")
+          echo "## Benchmark results for ${RELEASE_TAG} - ${timestamp}\n" > /tmp/bench_update.md
+          echo '```' >> /tmp/bench_update.md
+          sed -n '1,200p' "$out" >> /tmp/bench_update.md
+          echo '```' >> /tmp/bench_update.md
+
+          if [ -f "$md" ]; then
+            cat $md >> /tmp/bench_update.md
+          fi
+
+          mv /tmp/bench_update.md $md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add $md
+          git commit -m "Update BENCHMARKS.md: add results for ${RELEASE_TAG}" || echo "No changes to commit"
+          git push origin HEAD:${{ github.head_ref || github.ref }}
+          SH
+          chmod +x tools/update_benchmarks.sh
+          ./tools/update_benchmarks.sh
+
