@@ -1,4 +1,4 @@
-package recorder
+package agent
 
 import (
 	"archive/zip"
@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/echotools/nevr-common/gen/go/rtapi"
+	"github.com/echotools/nevrcap"
 	"go.uber.org/zap"
 )
 
@@ -29,7 +31,7 @@ type FrameDataLogSession struct {
 	logger      *zap.Logger
 
 	filePath   string
-	outgoingCh chan *FrameData
+	outgoingCh chan *rtapi.LobbySessionStateFrame
 	buf        *bytes.Buffer
 
 	sessionID string // Session ID for the current session
@@ -48,7 +50,7 @@ func NewFrameDataLogSession(ctx context.Context, logger *zap.Logger, filePath st
 		logger:      logger,
 
 		filePath:   filePath,
-		outgoingCh: make(chan *FrameData, 1000), // Buffered channel for outgoing frames
+		outgoingCh: make(chan *rtapi.LobbySessionStateFrame, 1000), // Buffered channel for outgoing frames
 		buf:        bytes.NewBuffer(make([]byte, 0, 64*1024)),
 		sessionID:  sessionID, // Initialize with the provided session ID
 	}
@@ -98,6 +100,11 @@ func (fw *FrameDataLogSession) ProcessFrames() error {
 
 	byteCount := 0
 
+	writer, err := nevrcap.NewEchoReplayCodecWriter(fw.filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create EchoReplayCodecWriter: %w", err)
+	}
+
 OuterLoop:
 	for {
 		select {
@@ -110,10 +117,10 @@ OuterLoop:
 			}
 
 			// Extract the session UUID from the frame's session data
-			sessionID, err := fw.extractSessionUUID(frame.SessionData)
-			if err != nil {
+			sessionID := frame.GetSession().GetSessionId()
+			if sessionID == "" {
 				fw.logger.Error("Failed to extract session UUID from frame",
-					zap.String("data", string(frame.SessionData)),
+					zap.Any("data", frame.GetSession()),
 					zap.Error(err))
 				fw.Unlock()
 				break OuterLoop
@@ -130,8 +137,7 @@ OuterLoop:
 			}
 
 			// Write the frame to the buffer
-			byteCount += fw.writeReplayFrame(fw.buf, frame)
-
+			byteCount += writer.WriteReplayFrame(fw.buf, frame)
 			// Check if the buffer has reached the chunk size
 			if fw.buf.Len() >= zipFileChunkSize {
 				// Write the buffer to the file
@@ -173,7 +179,7 @@ OuterLoop:
 	return nil
 }
 
-func (fw *FrameDataLogSession) WriteFrame(frame *FrameData) error {
+func (fw *FrameDataLogSession) WriteFrame(frame *rtapi.LobbySessionStateFrame) error {
 	if fw.IsStopped() {
 		return fmt.Errorf("frame writer is stopped")
 	}
@@ -203,26 +209,6 @@ func (fw *FrameDataLogSession) IsStopped() bool {
 	fw.Lock()
 	defer fw.Unlock()
 	return fw.stopped
-}
-
-func (fw *FrameDataLogSession) extractSessionUUID(sessionData []byte) (string, error) {
-	response := SessionMeta{}
-	if err := json.Unmarshal(sessionData, &response); err != nil {
-		return "", fmt.Errorf("failed to unmarshal response: %v", err)
-	}
-	return response.SessionUUID, nil
-}
-func (fw *FrameDataLogSession) writeReplayFrame(dst *bytes.Buffer, frame *FrameData) int {
-	// Format is "2006/01/02 15:04:05.000\t<session data>\t<bone data>\n"
-	dataSize := len(frame.SessionData) + len(frame.PlayerBoneData) + 23 + 2 + 1
-	dst.Grow(dataSize) // 23 for timestamp, 2 for tabs, 1 for newline
-	dst.WriteString(frame.Timestamp.UTC().Format("2006/01/02 15:04:05.000"))
-	dst.WriteByte('\t') // Tab separator
-	dst.Write(frame.SessionData)
-	dst.WriteByte('\t') // Tab separator
-	dst.Write(frame.PlayerBoneData)
-	dst.WriteByte('\n') // Newline at the end
-	return dataSize
 }
 
 func EchoReplaySessionFilename(ts time.Time, sessionID string) string {

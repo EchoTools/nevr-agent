@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/echotools/evr-data-recorder/v3/recorder"
+	"github.com/echotools/evr-data-recorder/v3/internal/agent"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -29,6 +29,14 @@ type Flags struct {
 	OutputDirectory string
 	LogPath         string
 	Debug           bool
+	// Stream configuration
+	StreamEnabled   bool
+	StreamHTTPURL   string
+	StreamSocketURL string
+	StreamHTTPKey   string
+	StreamServerKey string
+	StreamUsername  string
+	StreamPassword  string
 }
 
 var opts = Flags{}
@@ -84,8 +92,16 @@ func parseFlags() {
 	flag.BoolVar(&opts.Debug, "debug", false, "Enable debug logging")
 	flag.StringVar(&opts.LogPath, "log", "", "Log file path")
 	// Output options
-	flag.StringVar(&opts.Format, "format", "replay", "Output format")
+	flag.StringVar(&opts.Format, "format", "replay", "Output format (replay, rtapi)")
 	flag.StringVar(&opts.OutputDirectory, "output", "output", "Output directory")
+	// Stream options
+	flag.BoolVar(&opts.StreamEnabled, "stream", false, "Enable streaming to Nakama server")
+	flag.StringVar(&opts.StreamHTTPURL, "stream-http", "https://g.echovrce.com:7350", "Stream HTTP URL")
+	flag.StringVar(&opts.StreamSocketURL, "stream-socket", "wss://g.echovrce.com:7350/ws", "Stream WebSocket URL")
+	flag.StringVar(&opts.StreamHTTPKey, "stream-http-key", "this_is_the_http_key", "Stream HTTP key")
+	flag.StringVar(&opts.StreamServerKey, "stream-server-key", "this_is_the_server_key", "Stream server key")
+	flag.StringVar(&opts.StreamUsername, "stream-username", "", "Stream username")
+	flag.StringVar(&opts.StreamPassword, "stream-password", "", "Stream password")
 
 	// Set usage
 	flag.Usage = func() {
@@ -182,7 +198,7 @@ func start(ctx context.Context, logger *zap.Logger, opts Flags) {
 		logger.Fatal("Failed to create output directory", zap.String("output_directory", opts.OutputDirectory), zap.Error(err))
 	}
 	// For each port in the target list, check if the port is open, then start polling
-	sessions := make(map[string]recorder.FrameWriter)
+	sessions := make(map[string]agent.FrameWriter)
 
 	interval := time.Second / time.Duration(opts.Frequency)
 	cycleTicker := time.NewTicker(100 * time.Millisecond)
@@ -220,10 +236,10 @@ OuterLoop:
 						delete(sessions, baseURL)
 					}
 				}
-				meta, err := recorder.GetSessionMeta(baseURL)
+				meta, err := agent.GetSessionMeta(baseURL)
 				if err != nil {
 					switch err {
-					case recorder.ErrAPIAccessDisabled:
+					case agent.ErrAPIAccessDisabled:
 						logger.Warn("API access is disabled on the server")
 					default:
 						logger.Warn("Failed to get session metadata", zap.Error(err))
@@ -236,19 +252,85 @@ OuterLoop:
 
 				logger.Debug("Retrieved session metadata", zap.Any("meta", meta))
 
-				filename := recorder.EchoReplaySessionFilename(time.Now(), meta.SessionUUID)
+				var filename string
+				var outputPath string
+				var fileWriter agent.FrameWriter
 
+				// Create the appropriate file writer based on format
+				formats := strings.Split(opts.Format, ",")
+
+				if len(formats) > 1 {
+					// Create multi-writer
+					writers := make([]agent.FrameWriter, 0, len(formats))
+					for _, format := range formats {
+						format = strings.TrimSpace(format)
+						var fw agent.FrameWriter
+						switch format {
+						case "stream":
+							rtapiWriter := agent.NewStreamWriter(logger, opts.StreamHTTPURL, opts.StreamSocketURL, opts.StreamHTTPKey, opts.StreamServerKey, opts.StreamUsername, opts.StreamPassword)
+							if err := rtapiWriter.Connect(); err != nil {
+								logger.Error("Failed to connect stream writer", zap.Error(err))
+								continue
+							}
+							logger.Info("Stream writer connected successfully")
+							// Create multi-writer to write to both file and stream
+
+							fw = rtapiWriter
+						case "replay":
+							fallthrough
+						default:
+							filename = agent.EchoReplaySessionFilename(time.Now(), meta.SessionUUID)
+							outputPath = filepath.Join(opts.OutputDirectory, filename)
+							replayWriter := agent.NewFrameDataLogSession(ctx, logger, outputPath, meta.SessionUUID)
+							go replayWriter.ProcessFrames()
+							fw = replayWriter
+						}
+						writers = append(writers, fw)
+					}
+					fileWriter = agent.NewMultiWriter(logger, writers...)
+				} else {
+					switch formats[0] {
+					case "stream":
+						rtapiWriter := agent.NewStreamWriter(logger, opts.StreamHTTPURL, opts.StreamSocketURL, opts.StreamHTTPKey, opts.StreamServerKey, opts.StreamUsername, opts.StreamPassword)
+						if err := rtapiWriter.Connect(); err != nil {
+							logger.Error("Failed to connect stream writer", zap.Error(err))
+							continue
+						}
+						logger.Info("Stream writer connected successfully")
+						// Create multi-writer to write to both file and stream
+						fileWriter = rtapiWriter
+					case "replay":
+						fallthrough
+					default:
+						filename = agent.EchoReplaySessionFilename(time.Now(), meta.SessionUUID)
+						outputPath = filepath.Join(opts.OutputDirectory, filename)
+						replayWriter := agent.NewFrameDataLogSession(ctx, logger, outputPath, meta.SessionUUID)
+						go replayWriter.ProcessFrames()
+						fileWriter = replayWriter
+					}
+				}
 				logger = logger.With(zap.String("session_uuid", meta.SessionUUID), zap.String("filename", filename))
-				outputPath := filepath.Join(opts.OutputDirectory, filename)
-				session := recorder.NewFrameDataLogSession(ctx, logger, outputPath, meta.SessionUUID)
+
+				var session agent.FrameWriter = fileWriter
+
+				// If streaming is enabled, create stream writer and multi-writer
+				if opts.StreamEnabled {
+					streamWriter := agent.NewStreamWriter(logger, opts.StreamHTTPURL, opts.StreamSocketURL, opts.StreamHTTPKey, opts.StreamServerKey, opts.StreamUsername, opts.StreamPassword)
+					if err := streamWriter.Connect(); err != nil {
+						logger.Error("Failed to connect stream writer", zap.Error(err))
+					} else {
+						logger.Info("Stream writer connected successfully")
+						// Create multi-writer to write to both file and stream
+						session = agent.NewMultiWriter(logger, fileWriter, streamWriter)
+					}
+				}
+
 				sessions[baseURL] = session
-				go session.ProcessFrames()
-				go recorder.NewHTTPFramePoller(session.Context(), logger, client, baseURL, interval, session)
-				// Create a frame writer
+				go agent.NewHTTPFramePoller(session.Context(), logger, client, baseURL, interval, session)
 
-				// Create a new context for the poller
-
-				logger.Info("Added new frame client", zap.String("file_path", outputPath))
+				logger.Info("Added new frame client",
+					zap.String("file_path", outputPath),
+					zap.Bool("streaming_enabled", opts.StreamEnabled))
 			}
 		}
 

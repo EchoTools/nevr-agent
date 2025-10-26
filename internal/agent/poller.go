@@ -1,4 +1,4 @@
-package recorder
+package agent
 
 import (
 	"bytes"
@@ -8,7 +8,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/echotools/nevrcap"
 	"go.uber.org/zap"
+)
+
+var (
+	EndpointSession = func(baseURL string) string {
+		return baseURL + "/session"
+	}
+
+	EndpointPlayerBones = func(baseURL string) string {
+		return baseURL + "/player_bones"
+	}
 )
 
 func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Client, baseURL string, interval time.Duration, session FrameWriter) {
@@ -22,6 +33,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		wg                sync.WaitGroup
 		sessionURL        = EndpointSession(baseURL)
 		playerBonesURL    = EndpointPlayerBones(baseURL)
+		processor         = nevrcap.NewFrameProcessor()
 		sessionBuffer     = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
 		playerBonesBuffer = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
 	)
@@ -89,14 +101,15 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 			return
 		default:
 		}
-		// Create a new FrameData with the fetched data
-		frameData := &FrameData{
-			Timestamp:      time.Now(),
-			SessionData:    sessionBuffer.Bytes(),
-			PlayerBoneData: playerBonesBuffer.Bytes(),
+
+		frame, err := processor.ProcessFrame(sessionBuffer.Bytes(), playerBonesBuffer.Bytes(), time.Now().Add(time.Millisecond))
+		if err != nil {
+			logger.Error("Failed to process frame", zap.Error(err))
+			continue
 		}
+
 		// Write the data to the FrameWriter
-		if err := session.WriteFrame(frameData); err != nil {
+		if err := session.WriteFrame(frame); err != nil {
 			logger.Error("Failed to write frame data",
 				zap.Error(err))
 			continue

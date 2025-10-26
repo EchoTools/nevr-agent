@@ -4,7 +4,7 @@ LDFLAGS = -X main.version=$(VERSION) -s -w
 BINARY = datarecorder
 BIN_DIR = .
 
-.PHONY: all build build-linux build-windows test bench clean version
+.PHONY: all build build-linux build-windows test bench clean version replayer agent converter
 
 all: build
 
@@ -14,6 +14,21 @@ version:
 build: | $(BIN_DIR)
 	@echo "Building $(BINARY) (version=$(VERSION))"
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) .
+
+agent: | $(BIN_DIR)
+	@echo "Building replay-server (version=$(VERSION))"
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/agent ./cmd/agent
+
+replayer: | $(BIN_DIR)
+	@echo "Building replay-server (version=$(VERSION))"
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/replayer ./cmd/replayer
+
+
+converter: | $(BIN_DIR)
+	@echo "Building replay-server (version=$(VERSION))"
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/converter ./cmd/converter
+
+
 
 build-linux: | $(BIN_DIR)
 	@echo "Building linux/amd64 $(BINARY) (version=$(VERSION))"

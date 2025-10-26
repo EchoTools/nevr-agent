@@ -1,6 +1,7 @@
-package recorder
+package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +73,7 @@ func GetSessionMeta(baseURL string) (r SessionMeta, err error) {
 	if err := json.Unmarshal(buf, &response); err != nil {
 		return r, fmt.Errorf("failed to unmarshal response: %v", err)
 	}
+
 	if response.SessionUUID == "" {
 		return r, fmt.Errorf("session UUID is empty in response: %s", string(buf))
 	}

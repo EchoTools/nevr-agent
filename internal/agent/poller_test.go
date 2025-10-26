@@ -1,4 +1,4 @@
-package recorder
+package agent
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	rtapi "github.com/echotools/nevr-common/gen/go/rtapi"
 	"go.uber.org/zap"
 )
 
@@ -19,13 +20,13 @@ func testLogger(t testing.TB) *zap.Logger {
 }
 
 type benchmarkWriter struct {
-	frames []*FrameData
+	frames []*rtapi.LobbySessionStateFrame
 }
 
 func (test *benchmarkWriter) Context() context.Context {
 	return context.Background()
 }
-func (b *benchmarkWriter) WriteFrame(frame *FrameData) error {
+func (b *benchmarkWriter) WriteFrame(frame *rtapi.LobbySessionStateFrame) error {
 	b.frames = append(b.frames, frame)
 	return nil
 }
@@ -64,7 +65,7 @@ func BenchmarkNewFrameLogger_TwoURLs_32KB_MaxPollingRate(b *testing.B) {
 	defer cancel()
 
 	benchWriter := &benchmarkWriter{
-		frames: make([]*FrameData, 0, b.N*2), // Preallocate space for frames
+		frames: make([]*rtapi.LobbySessionStateFrame, 0, b.N*2), // Preallocate space for frames
 	}
 
 	NewHTTPFramePoller(ctx, testLogger, http.DefaultClient, srv1.URL, interval, benchWriter)
