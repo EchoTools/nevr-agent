@@ -16,16 +16,16 @@ build: | $(BIN_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) .
 
 agent: | $(BIN_DIR)
-	@echo "Building replay-server (version=$(VERSION))"
+	@echo "Building agent (version=$(VERSION))"
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/agent ./cmd/agent
 
 replayer: | $(BIN_DIR)
-	@echo "Building replay-server (version=$(VERSION))"
+	@echo "Building replayer (version=$(VERSION))"
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/replayer ./cmd/replayer
 
 
 converter: | $(BIN_DIR)
-	@echo "Building replay-server (version=$(VERSION))"
+	@echo "Building converter (version=$(VERSION))"
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/converter ./cmd/converter
 
 
