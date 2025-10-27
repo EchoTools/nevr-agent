@@ -1,0 +1,10 @@
+# Go workspace file
+go.work
+go.work.sum
+
+# Test files
+*.nevrcap
+*.echoreplay
+/benchmark_*
+/test_*
+/output

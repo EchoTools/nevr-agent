@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	rtapi "github.com/echotools/nevr-common/gen/go/rtapi"
+	rtapi "github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"github.com/echotools/nevrcap"
 	nkrtapi "github.com/heroiclabs/nakama-common/rtapi"
 	"go.uber.org/zap"

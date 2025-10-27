@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	rtapi "github.com/echotools/nevr-common/gen/go/rtapi"
+	rtapi "github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"go.uber.org/zap"
 )
 

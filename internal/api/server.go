@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/echotools/nevr-common/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"github.com/gofrs/uuid/v5"
 	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/mongo"

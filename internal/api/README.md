@@ -162,7 +162,7 @@ go run cmd/main.go
 
 ## Dependencies
 
-- `github.com/echotools/nevr-common/gen/go/rtapi` - Protocol buffer definitions
+- `github.com/echotools/nevr-common/v4/gen/go/rtapi` - Protocol buffer definitions
 - `github.com/gofrs/uuid/v5` - UUID generation and parsing
 - `github.com/gorilla/mux` - HTTP routing
 - `go.mongodb.org/mongo-driver` - MongoDB driver

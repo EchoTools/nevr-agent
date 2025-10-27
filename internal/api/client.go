@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/echotools/nevr-common/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

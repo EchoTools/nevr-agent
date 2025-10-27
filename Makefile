@@ -4,7 +4,7 @@ LDFLAGS = -X main.version=$(VERSION) -s -w
 BINARY = datarecorder
 BIN_DIR = .
 
-.PHONY: all build build-linux build-windows test bench clean version replayer agent converter
+.PHONY: all build build-linux build-windows test bench clean version replayer agent converter apiserver
 
 all: build
 
@@ -28,7 +28,9 @@ converter: | $(BIN_DIR)
 	@echo "Building converter (version=$(VERSION))"
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/converter ./cmd/converter
 
-
+apiserver: | $(BIN_DIR)
+	@echo "Building apiserver (version=$(VERSION))"
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/apiserver ./cmd/apiserver
 
 build-linux: | $(BIN_DIR)
 	@echo "Building linux/amd64 $(BINARY) (version=$(VERSION))"

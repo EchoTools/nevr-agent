@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-common/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"github.com/echotools/nevrcap"
 	"go.uber.org/zap"
 )

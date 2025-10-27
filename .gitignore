@@ -32,5 +32,6 @@ go.work.sum
 /agent
 /replayer
 /converter
+/apiserver
 
 output/
