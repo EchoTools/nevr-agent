@@ -14,6 +14,13 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
+var jsonMarshaler = &protojson.MarshalOptions{
+	UseProtoNames:   false,
+	UseEnumNumbers:  true,
+	EmitUnpopulated: true,
+	Indent:          "  ",
+}
+
 // Server represents the HTTP server for session events
 type Server struct {
 	mongoClient *mongo.Client
@@ -66,8 +73,8 @@ func NewServer(mongoClient *mongo.Client, logger Logger) *Server {
 
 // setupRoutes configures the HTTP routes
 func (s *Server) setupRoutes() {
-	s.router.HandleFunc("/session-events", s.storeSessionEventHandler).Methods("POST")
-	s.router.HandleFunc("/session-events/{match_id}", s.getSessionEventsHandler).Methods("GET")
+	s.router.HandleFunc("/lobby-session-events", s.storeSessionEventHandler).Methods("POST")
+	s.router.HandleFunc("/lobby-session-events/{lobby_session_id}", s.getSessionEventsHandler).Methods("GET")
 	s.router.HandleFunc("/health", s.healthHandler).Methods("GET")
 }
 
@@ -105,28 +112,27 @@ func (s *Server) storeSessionEventHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	if !matchID.IsValid() {
-		s.logger.Error("Invalid match ID", "session_id", msg.GetSession().GetSessionId(), "node", node)
+		s.logger.Error("Invalid match ID", "lobby_session_id", msg.GetSession().GetSessionId(), "node", node)
 		http.Error(w, "Invalid match ID in payload", http.StatusBadRequest)
 		return
 	}
 
 	event := &SessionEvent{
-		MatchID: matchID,
-		UserID:  userID,
-		Data:    msg,
+		LobbySessionUUID: matchID.UUID.String(),
+		UserID:           userID,
+		FrameData:        string(payload),
 	}
-
 	// Store the event to MongoDB
 	if err := StoreSessionEvent(ctx, s.mongoClient, event); err != nil {
-		s.logger.Error("Failed to store session event", "error", err, "match_id", event.MatchID)
+		s.logger.Error("Failed to store session event", "error", err, "lobby_session_id", event.LobbySessionUUID)
 		http.Error(w, "Failed to store session event", http.StatusInternalServerError)
 		return
 	}
 
 	// Return success response
 	response := map[string]any{
-		"success":  true,
-		"match_id": event.MatchID.String(),
+		"success":          true,
+		"lobby_session_id": event.LobbySessionUUID,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -136,43 +142,52 @@ func (s *Server) storeSessionEventHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.logger.Debug("Stored session event", "match_id", event.MatchID)
+	s.logger.Debug("Stored session event", "session_uuid", event.LobbySessionUUID)
 }
 
 // getSessionEventsHandler handles GET requests to retrieve session events by match ID
 func (s *Server) getSessionEventsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
-	matchIDStr := vars["match_id"]
+	sessionID := vars["lobby_session_id"]
 
-	if matchIDStr == "" {
-		http.Error(w, "match_id is required", http.StatusBadRequest)
+	if sessionID == "" {
+		http.Error(w, "lobby_session_id is required", http.StatusBadRequest)
 		return
 	}
 
 	// Retrieve events from MongoDB
-	events, err := RetrieveSessionEventsByMatchID(ctx, s.mongoClient, matchIDStr)
+	events, err := RetrieveSessionEventsByMatchID(ctx, s.mongoClient, sessionID)
 	if err != nil {
-		s.logger.Error("Failed to retrieve session events", "error", err, "match_id", matchIDStr)
+		s.logger.Error("Failed to retrieve session events", "error", err, "lobby_session_id", sessionID)
 		http.Error(w, "Failed to retrieve session events", http.StatusInternalServerError)
 		return
 	}
 
 	// Return response
-	response := map[string]any{
-		"match_id": matchIDStr,
-		"count":    len(events),
-		"events":   events,
+	entries := make([]*SessionEventResponseEntry, 0, len(events))
+	for _, e := range events {
+		entry := &SessionEventResponseEntry{
+			UserID:    e.UserID,
+			FrameData: (json.RawMessage)([]byte(e.FrameData)),
+		}
+		entries = append(entries, entry)
+	}
+
+	response := &SessionResponse{
+		LobbySessionUUID: sessionID,
+		Events:           entries,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Error("Failed to encode response", "error", err)
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 
-	s.logger.Debug("Retrieved session events", "match_id", matchIDStr, "count", len(events))
+	s.logger.Debug("Retrieved session events", "lobby_session_id", sessionID, "count", len(events))
 }
 
 // healthHandler handles health check requests
@@ -249,4 +264,15 @@ func (s *Server) StartWithContext(ctx context.Context, address string) error {
 
 	s.logger.Info("Server shutdown completed")
 	return nil
+}
+
+type SessionResponse struct {
+	LobbySessionUUID string                       `json:"lobby_session_id"`
+	Events           []*SessionEventResponseEntry `json:"events"`
+}
+
+// SessionEvent represents a simple session event object
+type SessionEventResponseEntry struct {
+	UserID    string          `json:"user_id,omitempty"`
+	FrameData json.RawMessage `json:"frame,omitempty"`
 }

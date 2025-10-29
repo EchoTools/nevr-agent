@@ -130,29 +130,29 @@ func (s *Service) createIndexes(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, s.config.MongoTimeout)
 	defer cancel()
 
-	// Create index on match_id for faster queries
+	// Create index on lobby_session_id for faster queries
 	indexModel := mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "match_id", Value: 1},
+			{Key: "lobby_session_id", Value: 1},
 		},
 	}
 
 	_, err := collection.Indexes().CreateOne(ctx, indexModel)
 	if err != nil {
-		return fmt.Errorf("failed to create match_id index: %w", err)
+		return fmt.Errorf("failed to create lobby_session_id index: %w", err)
 	}
 
-	// Create compound index on match_id and timestamp for sorted queries
+	// Create compound index on lobby_session_id and timestamp for sorted queries
 	timestampIndexModel := mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "match_id", Value: 1},
+			{Key: "lobby_session_id", Value: 1},
 			{Key: "timestamp", Value: 1},
 		},
 	}
 
 	_, err = collection.Indexes().CreateOne(ctx, timestampIndexModel)
 	if err != nil {
-		return fmt.Errorf("failed to create match_id+timestamp index: %w", err)
+		return fmt.Errorf("failed to create lobby_session_id+timestamp index: %w", err)
 	}
 
 	s.logger.Debug("Created database indexes")

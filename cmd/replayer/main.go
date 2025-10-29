@@ -15,7 +15,15 @@ import (
 	"github.com/echotools/nevr-common/v4/gen/go/apigame"
 	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"github.com/echotools/nevrcap"
+	"google.golang.org/protobuf/encoding/protojson"
 )
+
+var jsonMarshaler = &protojson.MarshalOptions{
+	UseProtoNames:   false,
+	UseEnumNumbers:  true,
+	EmitUnpopulated: true,
+	Indent:          "  ",
+}
 
 type ReplayServer struct {
 	files    []string
@@ -337,9 +345,14 @@ func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	encoder.Encode(frameData)
+	data, err := jsonMarshaler.Marshal(frameData)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": err.Error(),
+		})
+	}
+
+	w.Write(data)
 }
 
 func (rs *ReplayServer) handlePlayerBones(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -16,8 +17,8 @@ func StoreSessionEvent(ctx context.Context, mongoClient *mongo.Client, event *Se
 		return fmt.Errorf("mongo client is nil")
 	}
 
-	if !event.MatchID.IsValid() {
-		return fmt.Errorf("match_id is invalid")
+	if uuid.FromStringOrNil(event.LobbySessionUUID).IsNil() {
+		return fmt.Errorf("lobby_session_id is invalid")
 	}
 
 	collection := mongoClient.Database(sessionEventDatabaseName).Collection(sessionEventCollectionName)
@@ -40,7 +41,7 @@ func RetrieveSessionEventsByMatchID(ctx context.Context, mongoClient *mongo.Clie
 	}
 
 	if matchID == "" {
-		return nil, fmt.Errorf("match_id is required")
+		return nil, fmt.Errorf("lobby_session_id is required")
 	}
 
 	collection := mongoClient.Database(sessionEventDatabaseName).Collection(sessionEventCollectionName)
@@ -48,8 +49,8 @@ func RetrieveSessionEventsByMatchID(ctx context.Context, mongoClient *mongo.Clie
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// Create filter for match_id
-	filter := bson.M{"match_id": matchID}
+	// Create filter for lobby_session_id
+	filter := bson.M{"lobby_session_id": matchID}
 
 	// Sort by timestamp ascending
 	opts := options.Find().SetSort(bson.D{{Key: "timestamp", Value: 1}})

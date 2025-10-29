@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
 	"github.com/gofrs/uuid/v5"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
@@ -68,7 +67,7 @@ func (t MatchID) IsValid() bool {
 }
 
 // MarshalText returns the text representation of the match ID.
-func (t MatchID) MarshalText() ([]byte, error) {
+func (t MatchID) Mlobby_session_idarshalText() ([]byte, error) {
 	return []byte(t.String()), nil
 }
 
@@ -115,7 +114,7 @@ func MatchIDFromStringOrNil(s string) (t MatchID) {
 
 // SessionEvent represents a simple session event object
 type SessionEvent struct {
-	MatchID MatchID                       `bson:"match_id" json:"match_id"`
-	UserID  string                        `bson:"user_id,omitempty" json:"user_id,omitempty"`
-	Data    *rtapi.LobbySessionStateFrame `bson:"data,omitempty" json:"data,omitempty"`
+	LobbySessionUUID string `bson:"lobby_session_id" json:"lobby_session_id"`
+	UserID           string `bson:"user_id,omitempty" json:"user_id,omitempty"`
+	FrameData        string `bson:"frame,omitempty" json:"frame,omitempty"`
 }

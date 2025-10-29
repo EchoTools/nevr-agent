@@ -52,8 +52,8 @@ func main() {
 	// Start service
 	fmt.Printf("Starting session events service on %s\n", config.ServerAddress)
 	fmt.Println("Available endpoints:")
-	fmt.Println("  POST /session-events - Store session event")
-	fmt.Println("  GET  /session-events/{match_id} - Get session events by match ID")
+	fmt.Println("  POST /lobby-session-events - Store session event")
+	fmt.Println("  GET  /lobby-session-events/{match_id} - Get session events by match ID")
 	fmt.Println("  GET  /health - Health check")
 
 	if err := service.Start(ctx); err != nil {

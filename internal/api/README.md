@@ -14,7 +14,7 @@ This package provides a standalone HTTP service for storing and retrieving sessi
 
 ### Store Session Event
 ```
-POST /session-events
+POST /lobby-session-events
 ```
 
 **Headers:**
@@ -34,7 +34,7 @@ POST /session-events
 
 ### Get Session Events
 ```
-GET /session-events/{match_id}
+GET /lobby-session-events/{match_id}
 ```
 
 **Response:**

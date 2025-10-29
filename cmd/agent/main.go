@@ -37,6 +37,11 @@ type Flags struct {
 	StreamServerKey string
 	StreamUsername  string
 	StreamPassword  string
+	// Events API configuration
+	EventsEnabled bool
+	EventsURL     string
+	EventsUserID  string
+	EventsNodeID  string
 }
 
 var opts = Flags{}
@@ -102,6 +107,12 @@ func parseFlags() {
 	flag.StringVar(&opts.StreamServerKey, "stream-server-key", "this_is_the_server_key", "Stream server key")
 	flag.StringVar(&opts.StreamUsername, "stream-username", "", "Stream username")
 	flag.StringVar(&opts.StreamPassword, "stream-password", "", "Stream password")
+
+	// Events API options
+	flag.BoolVar(&opts.EventsEnabled, "events", false, "Enable sending frames to /lobby-session-events endpoint")
+	flag.StringVar(&opts.EventsURL, "events-url", "http://localhost:8081", "Base URL of the events API (e.g., http://localhost:8081)")
+	flag.StringVar(&opts.EventsUserID, "events-user-id", "", "Optional user ID header for events API")
+	flag.StringVar(&opts.EventsNodeID, "events-node-id", "default-node", "Node ID header for events API")
 
 	// Set usage
 	flag.Usage = func() {
@@ -323,6 +334,13 @@ OuterLoop:
 						// Create multi-writer to write to both file and stream
 						session = agent.NewMultiWriter(logger, fileWriter, streamWriter)
 					}
+				}
+
+				// If events sending is enabled, add EventsAPI writer
+				if opts.EventsEnabled {
+					eventsWriter := agent.NewEventsAPIWriter(logger, opts.EventsURL, opts.EventsUserID, opts.EventsNodeID)
+					// Compose with any existing writer(s)
+					session = agent.NewMultiWriter(logger, session, eventsWriter)
 				}
 
 				sessions[baseURL] = session

@@ -51,15 +51,15 @@ func NewClient(config ClientConfig) *Client {
 
 // StoreSessionEventResponse represents the response from storing a session event
 type StoreSessionEventResponse struct {
-	Success bool   `json:"success"`
-	MatchID string `json:"match_id"`
+	Success          bool   `json:"success"`
+	LobbySessionUUID string `json:"lobby_session_id"`
 }
 
 // GetSessionEventsResponse represents the response from retrieving session events
 type GetSessionEventsResponse struct {
-	MatchID string                          `json:"match_id"`
-	Count   int                             `json:"count"`
-	Events  []*rtapi.LobbySessionStateFrame `json:"events"`
+	LobbySessionUUID string                          `json:"lobby_session_id"`
+	Count            int                             `json:"count"`
+	Events           []*rtapi.LobbySessionStateFrame `json:"events"`
 }
 
 // HealthResponse represents the health check response
@@ -77,7 +77,7 @@ func (c *Client) StoreSessionEvent(ctx context.Context, event *rtapi.LobbySessio
 	}
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/session-events", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/lobby-session-events", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -119,13 +119,13 @@ func (c *Client) StoreSessionEvent(ctx context.Context, event *rtapi.LobbySessio
 }
 
 // GetSessionEvents retrieves session events by match ID
-func (c *Client) GetSessionEvents(ctx context.Context, matchID string) (*GetSessionEventsResponse, error) {
-	if matchID == "" {
-		return nil, fmt.Errorf("match_id is required")
+func (c *Client) GetSessionEvents(ctx context.Context, lobbySessionUUID string) (*GetSessionEventsResponse, error) {
+	if lobbySessionUUID == "" {
+		return nil, fmt.Errorf("lobby_session_id is required")
 	}
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/session-events/"+matchID, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/lobby-session-events/"+lobbySessionUUID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
