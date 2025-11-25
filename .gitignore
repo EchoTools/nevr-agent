@@ -33,5 +33,6 @@ go.work.sum
 /replayer
 /converter
 /apiserver
-
+/dumpevents
+/webviewer
 output/

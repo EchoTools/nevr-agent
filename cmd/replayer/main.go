@@ -181,7 +181,7 @@ func (rs *ReplayServer) playEchoReplayFile(filename string) error {
 	return nil
 }
 
-func (rs *ReplayServer) playNEVRCapFile(filename string) error {
+func (rs *ReplayServer) playNevrCapFile(filename string) error {
 	reader, err := nevrcap.NewEchoReplayFileReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open rtapi file: %w", err)

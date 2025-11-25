@@ -345,13 +345,13 @@ func copyEchoReplayWithModifications(inputFile, outputFile string, config *Conve
 func copyNevrcapWithModifications(inputFile, outputFile string, config *ConverterConfig) (*ConversionStats, error) {
 	stats := &ConversionStats{}
 
-	reader, err := nevrcap.NewNEVRCapReader(inputFile)
+	reader, err := nevrcap.NewNevrCapReader(inputFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create input reader: %w", err)
 	}
 	defer reader.Close()
 
-	writer, err := nevrcap.NewNEVRCapWriter(outputFile)
+	writer, err := nevrcap.NewNevrCapWriter(outputFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create output writer: %w", err)
 	}
@@ -417,7 +417,7 @@ func excludeBoneDataFromEchoReplay(filename string, config *ConverterConfig) err
 }
 
 func countFramesInNevrcap(filename string) (int, error) {
-	reader, err := nevrcap.NewNEVRCapReader(filename)
+	reader, err := nevrcap.NewNevrCapReader(filename)
 	if err != nil {
 		return 0, err
 	}

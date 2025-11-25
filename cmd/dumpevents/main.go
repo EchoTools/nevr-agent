@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
@@ -66,7 +67,7 @@ func processEchoReplayFile(filename, outputFormat string) error {
 	case ".echoreplay":
 		reader, err = nevrcap.NewEchoReplayFileReader(filename)
 	case ".nevrcap":
-		reader, err = nevrcap.NewNEVRCapReader(filename)
+		reader, err = nevrcap.NewNevrCapReader(filename)
 	default:
 		return fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -84,14 +85,79 @@ func processEchoReplayFile(filename, outputFormat string) error {
 	frameCount := 0
 	var startTime, endTime time.Time
 
-	// Process frames and detect events
-	frame := &rtapi.LobbySessionStateFrame{}
-	var ok bool
+	var (
+		frameMu         sync.RWMutex
+		currentFrame    *rtapi.LobbySessionStateFrame
+		eventsWG        sync.WaitGroup
+		eventErrChan    = make(chan error, 1)
+		eventHandlerErr error
+	)
 
+	handleEvent := func(event *rtapi.LobbySessionEvent, frame *rtapi.LobbySessionStateFrame) error {
+		switch outputFormat {
+		case "json":
+			return outputEventJSON(event, frame)
+		case "text":
+			outputEventText(event, frame)
+			return nil
+		case "summary":
+			updateEventStats(event, eventStats)
+			return nil
+		default:
+			return fmt.Errorf("unsupported output format: %s", outputFormat)
+		}
+	}
+
+	eventsWG.Go(func() {
+		for events := range detector.EventsChan() {
+			frameMu.RLock()
+			frameSnapshot := currentFrame
+			frameMu.RUnlock()
+
+			for _, event := range events {
+				if err := handleEvent(event, frameSnapshot); err != nil {
+					select {
+					case eventErrChan <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	})
+
+	var stopOnce sync.Once
+	stopDetector := func() {
+		stopOnce.Do(func() {
+			detector.Stop()
+			eventsWG.Wait()
+		})
+	}
+	defer stopDetector()
+
+	checkEventHandlerErr := func() error {
+		if eventHandlerErr != nil {
+			return eventHandlerErr
+		}
+		select {
+		case err := <-eventErrChan:
+			eventHandlerErr = err
+			return err
+		default:
+			return nil
+		}
+	}
+
+	// Process frames and detect events
+	var ok bool
 	var parseDuration int64 = 0
 	var cycleTime time.Time
 	for {
+		if err := checkEventHandlerErr(); err != nil {
+			return err
+		}
 
+		frame := &rtapi.LobbySessionStateFrame{}
 		ok, err = reader.ReadFrameTo(frame)
 		if err != nil || !ok {
 			if err == io.EOF {
@@ -110,27 +176,24 @@ func processEchoReplayFile(filename, outputFormat string) error {
 		}
 		endTime = frame.Timestamp.AsTime()
 
-		// Detect events for this frame
-		events := detector.AddFrame(frame)
+		frameMu.Lock()
+		currentFrame = frame
+		frameMu.Unlock()
 
-		// Output events based on format
-		for _, event := range events {
-			switch outputFormat {
-			case "json":
-				if err := outputEventJSON(event, frame); err != nil {
-					return fmt.Errorf("failed to output JSON: %w", err)
-				}
-			case "text":
-				outputEventText(event, frame)
-			case "summary":
-				updateEventStats(event, eventStats)
-			default:
-				return fmt.Errorf("unsupported output format: %s", outputFormat)
-			}
-		}
-
+		// Queue frame for async detection
+		detector.ProcessFrame(frame)
 	}
-	fmt.Println(parseDuration / int64(frameCount))
+
+	if frameCount > 0 {
+		fmt.Println(parseDuration / int64(frameCount))
+	}
+
+	stopDetector()
+
+	if err := checkEventHandlerErr(); err != nil {
+		return err
+	}
+
 	// Output summary if requested
 	if outputFormat == "summary" {
 		outputSummary(eventStats, frameCount, startTime, endTime, filename)
@@ -142,16 +205,18 @@ func processEchoReplayFile(filename, outputFormat string) error {
 func outputEventJSON(event *rtapi.LobbySessionEvent, frame *rtapi.LobbySessionStateFrame) error {
 	// Create a structured output with event and frame context
 	output := map[string]any{
-		"timestamp":   frame.Timestamp.AsTime().Format(time.RFC3339Nano),
-		"frame_index": frame.FrameIndex,
-		"event_type":  getEventTypeName(event),
-		"event_data":  event,
+		"event_type": getEventTypeName(event),
+		"event_data": event,
 	}
 
 	// Add relevant game state context
-	if frame.Session != nil {
-		output["game_status"] = frame.Session.GameStatus
-		output["game_clock"] = frame.Session.GameClockDisplay
+	if frame != nil {
+		output["timestamp"] = frame.Timestamp.AsTime().Format(time.RFC3339Nano)
+		output["frame_index"] = frame.FrameIndex
+		if frame.Session != nil {
+			output["game_status"] = frame.Session.GameStatus
+			output["game_clock"] = frame.Session.GameClockDisplay
+		}
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
@@ -160,10 +225,15 @@ func outputEventJSON(event *rtapi.LobbySessionEvent, frame *rtapi.LobbySessionSt
 }
 
 func outputEventText(event *rtapi.LobbySessionEvent, frame *rtapi.LobbySessionStateFrame) {
-	timestamp := frame.Timestamp.AsTime().Format("2006-01-02 15:04:05.000")
+	timestamp := "unknown"
+	frameLabel := "unknown"
+	if frame != nil {
+		timestamp = frame.Timestamp.AsTime().Format("2006-01-02 15:04:05.000")
+		frameLabel = fmt.Sprintf("%d", frame.FrameIndex)
+	}
 	eventType := getEventTypeName(event)
 
-	fmt.Printf("[%s] Frame %d: %s", timestamp, frame.FrameIndex, eventType)
+	fmt.Printf("[%s] Frame %s: %s", timestamp, frameLabel, eventType)
 
 	// Add specific event details
 	switch payload := event.Event.(type) {
@@ -202,7 +272,7 @@ func outputEventText(event *rtapi.LobbySessionEvent, frame *rtapi.LobbySessionSt
 	}
 
 	// Add game status context
-	if frame.Session != nil && frame.Session.GameStatus != "" {
+	if frame != nil && frame.Session != nil && frame.Session.GameStatus != "" {
 		fmt.Printf(" (GameStatus: %s)", frame.Session.GameStatus)
 	}
 

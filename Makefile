@@ -1,44 +1,26 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
 LDFLAGS = -X main.version=$(VERSION) -s -w
 
-BINARY = datarecorder
-BIN_DIR = .
+# Binaries under cmd/
+CMDS := agent apiserver converter dumpevents replayer webviewer
 
-.PHONY: all build build-linux build-windows test bench clean version replayer agent converter apiserver
+.PHONY: all version cmds $(CMDS) bench test clean build-%
 
-all: build
+all: cmds
 
 version:
 	@echo $(VERSION)
 
-build: | $(BIN_DIR)
-	@echo "Building $(BINARY) (version=$(VERSION))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) .
+# Build all cmd/* binaries
+cmds: $(CMDS)
 
-agent: | $(BIN_DIR)
-	@echo "Building agent (version=$(VERSION))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/agent ./cmd/agent
+# Individual cmd/* targets (phony wrappers)
+$(CMDS): %: build-%
 
-replayer: | $(BIN_DIR)
-	@echo "Building replayer (version=$(VERSION))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/replayer ./cmd/replayer
-
-
-converter: | $(BIN_DIR)
-	@echo "Building converter (version=$(VERSION))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/converter ./cmd/converter
-
-apiserver: | $(BIN_DIR)
-	@echo "Building apiserver (version=$(VERSION))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/apiserver ./cmd/apiserver
-
-build-linux: | $(BIN_DIR)
-	@echo "Building linux/amd64 $(BINARY) (version=$(VERSION))"
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY)-linux .
-
-build-windows: | $(BIN_DIR)
-	@echo "Building windows/amd64 $(BINARY) (version=$(VERSION))"
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY).exe .
+# Pattern rule to build a cmd/* binary
+build-%:
+	@echo "Building $* (version=$(VERSION))"
+	go build -ldflags "$(LDFLAGS)" -o $* ./cmd/$*
 
 bench:
 	go test -bench=. -benchmem ./...
@@ -46,8 +28,5 @@ bench:
 test:
 	go test ./...
 
-$(BIN_DIR):
-	mkdir -p $(BIN_DIR)
-
 clean:
-	rm -rf $(BIN_DIR)
+	rm -f $(CMDS)
