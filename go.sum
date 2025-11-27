@@ -24,6 +24,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 h1:NmZ1PKzSTQbuGHw9DGPFomqkkLWMC+vZCkfs+FHv1Vg=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3/go.mod h1:zQrxl1YP88HQlA6i9c63DSVPFklWpGX4OWAc9bFuaH4=
+github.com/heroiclabs/nakama-common v1.37.0 h1:RceEGzvb+d+kPZY7ONbfozjaVyX3wIqNA/zZyp+M+mw=
+github.com/heroiclabs/nakama-common v1.37.0/go.mod h1:gpGzr0tineLtVeNuBNfN4lObWfalcXClXdH/LHV9IX0=
 github.com/heroiclabs/nakama-common v1.42.0 h1:Y+WbJ35YuYfTRBxNcnSYk8EjuG5ZIF2aPaOmkBGPzpI=
 github.com/heroiclabs/nakama-common v1.42.0/go.mod h1:E4yiMQmn8KHQ77WqBLVUfazdiPnwFYWqUrfGOrqOXk8=
 github.com/klauspost/compress v1.18.1 h1:bcSGx7UbpBqMChDtsF28Lw6v/G94LPrrbMbdC3JH2co=
