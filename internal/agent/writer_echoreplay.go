@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap"
+	"github.com/echotools/nevrcap/pkg/codecs"
 	"go.uber.org/zap"
 )
 
@@ -100,7 +100,7 @@ func (fw *FrameDataLogSession) ProcessFrames() error {
 
 	byteCount := 0
 
-	writer, err := nevrcap.NewEchoReplayCodecWriter(fw.filePath)
+	writer, err := codecs.NewEchoReplayWriter(fw.filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create EchoReplayCodecWriter: %w", err)
 	}

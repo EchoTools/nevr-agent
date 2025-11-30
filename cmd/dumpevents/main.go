@@ -11,7 +11,8 @@ import (
 	"time"
 
 	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap"
+	"github.com/echotools/nevrcap/pkg/codecs"
+	"github.com/echotools/nevrcap/pkg/events"
 )
 
 func main() {
@@ -65,9 +66,9 @@ func processEchoReplayFile(filename, outputFormat string) error {
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".echoreplay":
-		reader, err = nevrcap.NewEchoReplayFileReader(filename)
+		reader, err = codecs.NewEchoReplayReader(filename)
 	case ".nevrcap":
-		reader, err = nevrcap.NewNevrCapReader(filename)
+		reader, err = codecs.NewNevrCapReader(filename)
 	default:
 		return fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -78,7 +79,7 @@ func processEchoReplayFile(filename, outputFormat string) error {
 	defer reader.Close()
 
 	// Create event detector
-	detector := nevrcap.NewEventDetector()
+	detector := events.New()
 
 	// Statistics for summary mode
 	eventStats := make(map[string]int)

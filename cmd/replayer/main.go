@@ -14,7 +14,7 @@ import (
 
 	"github.com/echotools/nevr-common/v4/gen/go/apigame"
 	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap"
+	"github.com/echotools/nevrcap/pkg/codecs"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -145,7 +145,7 @@ func (rs *ReplayServer) playFile(filename string) error {
 }
 
 func (rs *ReplayServer) playEchoReplayFile(filename string) error {
-	reader, err := nevrcap.NewEchoReplayFileReader(filename)
+	reader, err := codecs.NewEchoReplayReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open echo replay file: %w", err)
 	}
@@ -182,7 +182,7 @@ func (rs *ReplayServer) playEchoReplayFile(filename string) error {
 }
 
 func (rs *ReplayServer) playNevrCapFile(filename string) error {
-	reader, err := nevrcap.NewEchoReplayFileReader(filename)
+	reader, err := codecs.NewEchoReplayReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open rtapi file: %w", err)
 	}

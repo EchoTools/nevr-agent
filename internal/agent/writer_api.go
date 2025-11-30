@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	rtapi "github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap"
+	"github.com/echotools/nevrcap/pkg/processing"
 	nkrtapi "github.com/heroiclabs/nakama-common/rtapi"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -20,7 +20,7 @@ const (
 type StreamWriter struct {
 	logger         *zap.Logger
 	streamClient   *NakamaWebSocketClient
-	frameProcessor *nevrcap.FrameProcessor
+	frameProcessor *processing.Processor
 	ctx            context.Context
 	cancel         context.CancelFunc
 	outgoingCh     chan *rtapi.LobbySessionStateFrame
@@ -38,7 +38,7 @@ type StreamFramePayload struct {
 func NewStreamWriter(logger *zap.Logger, httpURL, socketURL, httpKey, serverKey, username, password string) *StreamWriter {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	frameProcessor := nevrcap.NewFrameProcessor()
+	frameProcessor := processing.New()
 	streamClient := NewStreamClient(logger, httpURL, socketURL, httpKey, serverKey, username, password)
 
 	outgoingCh := make(chan *rtapi.LobbySessionStateFrame, 1000) // Buffered channel for outgoing frames
