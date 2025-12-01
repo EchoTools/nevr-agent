@@ -10,7 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [linux-amd64, windows-amd64]
+        goos: [linux, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          # Exclude Windows ARM64 for now (uncomment if needed)
+          - goos: windows
+            goarch: arm64
 
     steps:
       - name: Checkout
@@ -21,28 +26,43 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.25'
+          go-version: '1.23'
 
-      - name: Build binary
+      - name: Get version
+        id: version
         run: |
-          case "${{ matrix.target }}" in
-            linux-amd64)
-              echo "Building linux/amd64"
-              make build-linux
-              ;;
-            windows-amd64)
-              echo "Building windows/amd64"
-              make build-windows
-              ;;
-          esac
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          
+          # Extension for Windows
+          EXT=""
+          if [ "$GOOS" == "windows" ]; then
+            EXT=".exe"
+          fi
+          
+          # Build each command
+          for cmd in agent apiserver converter dumpevents replayer webviewer; do
+            OUTPUT_NAME="${cmd}_${VERSION}_${GOOS}_${GOARCH}${EXT}"
+            echo "Building $OUTPUT_NAME"
+            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/$cmd
+          done
 
       - name: List built files
-        run: ls -la . || true
+        run: ls -lah *_${{ steps.version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}*
 
-      - name: Upload binary to release
+      - name: Upload binaries to release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            *
+            *_${{ steps.version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
