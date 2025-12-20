@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -17,16 +17,16 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
-	userID     string
-	nodeID     string
+	jwtToken   string
+	userAgent  string
 }
 
 // ClientConfig holds configuration for the session events client
 type ClientConfig struct {
-	BaseURL string        // Base URL of the session events service (e.g., "http://localhost:8080")
-	Timeout time.Duration // HTTP request timeout (default: 30 seconds)
-	UserID  string        // User ID to include in requests
-	NodeID  string        // Node ID to include in requests
+	BaseURL   string        // Base URL of the session events service (e.g., "http://localhost:8080")
+	Timeout   time.Duration // HTTP request timeout (default: 30 seconds)
+	JWTToken  string        // JWT token for authentication
+	UserAgent string        // User-Agent header value
 }
 
 // NewClient creates a new session events client
@@ -35,8 +35,8 @@ func NewClient(config ClientConfig) *Client {
 		config.Timeout = 30 * time.Second
 	}
 
-	if config.NodeID == "" {
-		config.NodeID = "default-node"
+	if config.UserAgent == "" {
+		config.UserAgent = "NEVR-Agent"
 	}
 
 	return &Client{
@@ -44,8 +44,8 @@ func NewClient(config ClientConfig) *Client {
 		httpClient: &http.Client{
 			Timeout: config.Timeout,
 		},
-		userID: config.UserID,
-		nodeID: config.NodeID,
+		jwtToken:  config.JWTToken,
+		userAgent: config.UserAgent,
 	}
 }
 
@@ -57,9 +57,9 @@ type StoreSessionEventResponse struct {
 
 // GetSessionEventsResponse represents the response from retrieving session events
 type GetSessionEventsResponse struct {
-	LobbySessionUUID string                          `json:"lobby_session_id"`
-	Count            int                             `json:"count"`
-	Events           []*rtapi.LobbySessionStateFrame `json:"events"`
+	LobbySessionUUID string                              `json:"lobby_session_id"`
+	Count            int                                 `json:"count"`
+	Events           []*telemetry.LobbySessionStateFrame `json:"events"`
 }
 
 // HealthResponse represents the health check response
@@ -69,7 +69,7 @@ type HealthResponse struct {
 }
 
 // StoreSessionEvent stores a session event to the server
-func (c *Client) StoreSessionEvent(ctx context.Context, event *rtapi.LobbySessionStateFrame) (*StoreSessionEventResponse, error) {
+func (c *Client) StoreSessionEvent(ctx context.Context, event *telemetry.LobbySessionStateFrame) (*StoreSessionEventResponse, error) {
 	// Convert protobuf to JSON
 	jsonData, err := protojson.Marshal(event)
 	if err != nil {
@@ -84,11 +84,9 @@ func (c *Client) StoreSessionEvent(ctx context.Context, event *rtapi.LobbySessio
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	if c.userID != "" {
-		req.Header.Set("X-User-ID", c.userID)
-	}
-	if c.nodeID != "" {
-		req.Header.Set("X-Node-ID", c.nodeID)
+	req.Header.Set("User-Agent", c.userAgent)
+	if c.jwtToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.jwtToken)
 	}
 
 	// Send request
@@ -132,11 +130,9 @@ func (c *Client) GetSessionEvents(ctx context.Context, lobbySessionUUID string) 
 
 	// Set headers
 	req.Header.Set("Accept", "application/json")
-	if c.userID != "" {
-		req.Header.Set("X-User-ID", c.userID)
-	}
-	if c.nodeID != "" {
-		req.Header.Set("X-Node-ID", c.nodeID)
+	req.Header.Set("User-Agent", c.userAgent)
+	if c.jwtToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.jwtToken)
 	}
 
 	// Send request
@@ -176,6 +172,7 @@ func (c *Client) HealthCheck(ctx context.Context) (*HealthResponse, error) {
 
 	// Set headers
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
 
 	// Send request
 	resp, err := c.httpClient.Do(req)
@@ -204,31 +201,20 @@ func (c *Client) HealthCheck(ctx context.Context) (*HealthResponse, error) {
 	return &response, nil
 }
 
-// SetUserID updates the user ID for subsequent requests
-func (c *Client) SetUserID(userID string) {
-	c.userID = userID
+// SetJWTToken updates the JWT token for subsequent requests
+func (c *Client) SetJWTToken(token string) {
+	c.jwtToken = token
 }
 
-// SetNodeID updates the node ID for subsequent requests
-func (c *Client) SetNodeID(nodeID string) {
-	c.nodeID = nodeID
-}
-
-// GetUserID returns the current user ID
-func (c *Client) GetUserID() string {
-	return c.userID
-}
-
-// GetNodeID returns the current node ID
-func (c *Client) GetNodeID() string {
-	return c.nodeID
+// GetJWTToken returns the current JWT token
+func (c *Client) GetJWTToken() string {
+	return c.jwtToken
 }
 
 // NewSessionEventsClient is a convenience function to create a new session events client
-func NewSessionEventsClient(baseURL string, userID string, nodeID string) *Client {
+func NewSessionEventsClient(baseURL string, jwtToken string) *Client {
 	return NewClient(ClientConfig{
-		BaseURL: baseURL,
-		UserID:  userID,
-		NodeID:  nodeID,
+		BaseURL:  baseURL,
+		JWTToken: jwtToken,
 	})
 }

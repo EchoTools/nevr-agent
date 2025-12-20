@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
+	"github.com/echotools/nevr-agent/v4/internal/amqp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -20,6 +22,25 @@ type Config struct {
 	// HTTP server configuration
 	ServerAddress string `json:"server_address" yaml:"server_address"`
 
+	// JWT configuration
+	JWTSecret string `json:"jwt_secret" yaml:"jwt_secret"`
+
+	// AMQP configuration
+	AMQPURI       string `json:"amqp_uri" yaml:"amqp_uri"`
+	AMQPQueueName string `json:"amqp_queue_name" yaml:"amqp_queue_name"`
+	AMQPEnabled   bool   `json:"amqp_enabled" yaml:"amqp_enabled"`
+
+	// Capture storage configuration
+	CaptureDir       string `json:"capture_dir" yaml:"capture_dir"`
+	CaptureRetention string `json:"capture_retention" yaml:"capture_retention"` // Duration string
+	CaptureMaxSize   int64  `json:"capture_max_size" yaml:"capture_max_size"`   // Max bytes
+
+	// Rate limiting
+	MaxStreamHz int `json:"max_stream_hz" yaml:"max_stream_hz"`
+
+	// Metrics
+	MetricsAddr string `json:"metrics_addr" yaml:"metrics_addr"`
+
 	// Optional timeouts
 	MongoTimeout  time.Duration `json:"mongo_timeout" yaml:"mongo_timeout"`
 	ServerTimeout time.Duration `json:"server_timeout" yaml:"server_timeout"`
@@ -27,13 +48,42 @@ type Config struct {
 
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
+	// Check for environment variables with EVR_APISERVER_ prefix
+	amqpURI := os.Getenv("EVR_APISERVER_AMQP_URI")
+	if amqpURI == "" {
+		amqpURI = "amqp://guest:guest@localhost:5672/"
+	}
+
+	amqpEnabled := os.Getenv("EVR_APISERVER_AMQP_ENABLED") == "true"
+
+	mongoURI := os.Getenv("EVR_APISERVER_MONGO_URI")
+	if mongoURI == "" {
+		mongoURI = "mongodb://localhost:27017"
+	}
+
+	serverAddress := os.Getenv("EVR_APISERVER_SERVER_ADDRESS")
+	if serverAddress == "" {
+		serverAddress = ":8080"
+	}
+
+	jwtSecret := os.Getenv("EVR_APISERVER_JWT_SECRET")
+
 	return &Config{
-		MongoURI:       "mongodb://localhost:27017",
-		DatabaseName:   sessionEventDatabaseName,
-		CollectionName: sessionEventCollectionName,
-		ServerAddress:  ":8080",
-		MongoTimeout:   10 * time.Second,
-		ServerTimeout:  30 * time.Second,
+		MongoURI:         mongoURI,
+		DatabaseName:     sessionEventDatabaseName,
+		CollectionName:   sessionEventCollectionName,
+		ServerAddress:    serverAddress,
+		JWTSecret:        jwtSecret,
+		AMQPURI:          amqpURI,
+		AMQPQueueName:    amqp.DefaultQueueName,
+		AMQPEnabled:      amqpEnabled,
+		CaptureDir:       "./captures",
+		CaptureRetention: "168h",
+		CaptureMaxSize:   10 * 1024 * 1024 * 1024, // 10GB
+		MaxStreamHz:      60,
+		MetricsAddr:      "",
+		MongoTimeout:     10 * time.Second,
+		ServerTimeout:    30 * time.Second,
 	}
 }
 
@@ -51,15 +101,22 @@ func (c *Config) Validate() error {
 	if c.ServerAddress == "" {
 		return fmt.Errorf("server_address is required")
 	}
+	if c.JWTSecret == "" {
+		return fmt.Errorf("jwt_secret is required")
+	}
+	if c.AMQPEnabled && c.AMQPURI == "" {
+		return fmt.Errorf("amqp_uri is required when AMQP is enabled")
+	}
 	return nil
 }
 
 // Service represents the complete session events service
 type Service struct {
-	config      *Config
-	mongoClient *mongo.Client
-	server      *Server
-	logger      Logger
+	config        *Config
+	mongoClient   *mongo.Client
+	server        *Server
+	amqpPublisher *amqp.Publisher
+	logger        Logger
 }
 
 // NewService creates a new session events service
@@ -96,8 +153,31 @@ func (s *Service) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to create indexes: %w", err)
 	}
 
+	// Initialize AMQP publisher if enabled
+	if s.config.AMQPEnabled {
+		publisher, err := amqp.NewPublisher(&amqp.Config{
+			URI:       s.config.AMQPURI,
+			QueueName: s.config.AMQPQueueName,
+		}, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create AMQP publisher: %w", err)
+		}
+
+		if err := publisher.Connect(ctx); err != nil {
+			return fmt.Errorf("failed to connect to AMQP: %w", err)
+		}
+
+		s.amqpPublisher = publisher
+		s.logger.Info("AMQP publisher initialized", "queue", s.config.AMQPQueueName)
+	}
+
 	// Create HTTP server
-	s.server = NewServer(s.mongoClient, s.logger)
+	s.server = NewServer(s.mongoClient, s.logger, s.config.JWTSecret)
+
+	// Set the AMQP publisher on the server if available
+	if s.amqpPublisher != nil {
+		s.server.SetAMQPPublisher(s.amqpPublisher)
+	}
 
 	s.logger.Info("Session events service initialized successfully")
 	return nil
@@ -131,13 +211,13 @@ func (s *Service) createIndexes(ctx context.Context) error {
 	defer cancel()
 
 	// Create index on lobby_session_id for faster queries
-	indexModel := mongo.IndexModel{
+	sessionIDIndex := mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "lobby_session_id", Value: 1},
 		},
 	}
 
-	_, err := collection.Indexes().CreateOne(ctx, indexModel)
+	_, err := collection.Indexes().CreateOne(ctx, sessionIDIndex)
 	if err != nil {
 		return fmt.Errorf("failed to create lobby_session_id index: %w", err)
 	}
@@ -153,6 +233,32 @@ func (s *Service) createIndexes(ctx context.Context) error {
 	_, err = collection.Indexes().CreateOne(ctx, timestampIndexModel)
 	if err != nil {
 		return fmt.Errorf("failed to create lobby_session_id+timestamp index: %w", err)
+	}
+
+	// Create index on event_types for event type queries
+	eventTypesIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "event_types", Value: 1},
+		},
+	}
+
+	_, err = collection.Indexes().CreateOne(ctx, eventTypesIndex)
+	if err != nil {
+		return fmt.Errorf("failed to create event_types index: %w", err)
+	}
+
+	// Create compound index on lobby_session_id and event_types for filtered queries
+	compoundEventIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "lobby_session_id", Value: 1},
+			{Key: "event_types", Value: 1},
+			{Key: "timestamp", Value: 1},
+		},
+	}
+
+	_, err = collection.Indexes().CreateOne(ctx, compoundEventIndex)
+	if err != nil {
+		return fmt.Errorf("failed to create lobby_session_id+event_types+timestamp index: %w", err)
 	}
 
 	s.logger.Debug("Created database indexes")
@@ -171,15 +277,35 @@ func (s *Service) Start(ctx context.Context) error {
 
 // Stop stops the service and closes connections
 func (s *Service) Stop(ctx context.Context) error {
+	var errs []error
+
+	// Close AMQP publisher
+	if s.amqpPublisher != nil {
+		if err := s.amqpPublisher.Close(); err != nil {
+			s.logger.Error("Failed to close AMQP publisher", "error", err)
+			errs = append(errs, err)
+		}
+	}
+
+	// Disconnect MongoDB
 	if s.mongoClient != nil {
 		if err := s.mongoClient.Disconnect(ctx); err != nil {
 			s.logger.Error("Failed to disconnect MongoDB client", "error", err)
-			return err
+			errs = append(errs, err)
 		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors stopping service: %v", errs)
 	}
 
 	s.logger.Info("Session events service stopped")
 	return nil
+}
+
+// GetAMQPPublisher returns the AMQP publisher instance
+func (s *Service) GetAMQPPublisher() *amqp.Publisher {
+	return s.amqpPublisher
 }
 
 // GetServer returns the HTTP server instance

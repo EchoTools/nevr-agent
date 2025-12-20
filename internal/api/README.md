@@ -22,7 +22,7 @@ POST /lobby-session-events
 - `X-Node-ID: <node-id>` (optional, defaults to "default-node")
 - `X-User-ID: <user-id>` (optional)
 
-**Body:** JSON representation of `rtapi.LobbySessionStateFrame`
+**Body:** JSON representation of `telemetry.LobbySessionStateFrame`
 
 **Response:**
 ```json
@@ -119,7 +119,7 @@ func main() {
             Node: "node1",
         },
         UserID: "user123",
-        Data:   nil, // Your rtapi.LobbySessionStateFrame
+        Data:   nil, // Your telemetry.LobbySessionStateFrame
     }
 
     err := sessionevents.StoreSessionEvent(context.Background(), mongoClient, event)
@@ -178,7 +178,7 @@ The package stores session events in MongoDB with the following structure:
   "match_id": "uuid.node",
   "user_id": "string",
   "data": {
-    // rtapi.LobbySessionStateFrame data
+    // telemetry.LobbySessionStateFrame data
   }
 }
 ```

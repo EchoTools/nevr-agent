@@ -1,0 +1,90 @@
+name: Build and Attach Release Binaries
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    # Run on draft releases
+    if: github.event.release.draft == true
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          # Exclude Windows ARM64 for now
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          CGO_ENABLED: 0
+        run: |
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          
+          # Extension for Windows
+          EXT=""
+          if [ "$GOOS" == "windows" ]; then
+            EXT=".exe"
+          fi
+          
+          # Build the consolidated binary
+          OUTPUT_NAME="agent-${GOOS}-${GOARCH}${EXT}"
+          echo "Building $OUTPUT_NAME"
+          go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/agent
+
+      - name: Create archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          EXT=""
+          if [ "$GOOS" == "windows" ]; then
+            EXT=".exe"
+          fi
+          
+          BINARY_NAME="agent-${GOOS}-${GOARCH}${EXT}"
+          ARCHIVE_NAME="agent-${VERSION}-${GOOS}-${GOARCH}"
+          
+          if [ "$GOOS" == "windows" ]; then
+            zip "${ARCHIVE_NAME}.zip" "$BINARY_NAME" README.md
+            echo "ARTIFACT=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+          else
+            tar -czvf "${ARCHIVE_NAME}.tar.gz" "$BINARY_NAME" README.md
+            echo "ARTIFACT=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

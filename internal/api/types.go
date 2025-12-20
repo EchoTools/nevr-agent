@@ -4,9 +4,11 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/heroiclabs/nakama-common/runtime"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 const (
@@ -112,9 +114,30 @@ func MatchIDFromStringOrNil(s string) (t MatchID) {
 	return
 }
 
-// SessionEvent represents a simple session event object
+// SessionEvent represents a session event document in MongoDB
+// This is the v3 schema with explicit timestamps and ObjectID
 type SessionEvent struct {
+	ID               primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	LobbySessionUUID string             `bson:"lobby_session_id" json:"lobby_session_id"`
+	UserID           string             `bson:"user_id,omitempty" json:"user_id,omitempty"`
+	FrameData        string             `bson:"frame,omitempty" json:"frame,omitempty"`
+	Timestamp        time.Time          `bson:"timestamp" json:"timestamp"`
+	CreatedAt        time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt        time.Time          `bson:"updated_at" json:"updated_at"`
+}
+
+// SessionEventLegacy represents the v1 session event format for backward compatibility
+type SessionEventLegacy struct {
 	LobbySessionUUID string `bson:"lobby_session_id" json:"lobby_session_id"`
 	UserID           string `bson:"user_id,omitempty" json:"user_id,omitempty"`
 	FrameData        string `bson:"frame,omitempty" json:"frame,omitempty"`
+}
+
+// ToLegacy converts a SessionEvent to the legacy v1 format
+func (e *SessionEvent) ToLegacy() *SessionEventLegacy {
+	return &SessionEventLegacy{
+		LobbySessionUUID: e.LobbySessionUUID,
+		UserID:           e.UserID,
+		FrameData:        e.FrameData,
+	}
 }

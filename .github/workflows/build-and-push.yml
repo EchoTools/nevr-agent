@@ -1,0 +1,86 @@
+name: Build and Push Container Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Container image tag (default: git short sha)'
+        required: false
+        default: ''
+      push:
+        description: 'Push to registry'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event.inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ -z "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.sha }}"
+            SHORT_TAG=$(echo $TAG | cut -c1-7)
+            echo "tag=$SHORT_TAG" >> $GITHUB_OUTPUT
+            echo "full_tag=$SHORT_TAG" >> $GITHUB_OUTPUT
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "full_tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+          echo "Image will be tagged as: $TAG"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=${{ steps.tag.outputs.tag }}
+            type=raw,value=${{ steps.tag.outputs.tag }},enable=${{ steps.tag.outputs.tag != '' }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event.inputs.push == 'true' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image reference
+        if: github.event.inputs.push == 'true'
+        run: |
+          echo "Container image pushed successfully!"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}"

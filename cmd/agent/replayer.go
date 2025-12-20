@@ -2,19 +2,20 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/echotools/nevr-capture/v3/pkg/codecs"
 	"github.com/echotools/nevr-common/v4/gen/go/apigame"
-	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap/pkg/codecs"
+	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -31,7 +32,7 @@ type ReplayServer struct {
 	bindAddr string
 
 	mu           sync.RWMutex
-	currentFrame *rtapi.LobbySessionStateFrame
+	currentFrame *telemetry.LobbySessionStateFrame
 	isPlaying    bool
 	frameCount   int64
 	startTime    time.Time
@@ -46,66 +47,92 @@ type FrameResponse struct {
 	IsPlaying      bool                         `json:"is_playing"`
 }
 
-func main() {
-	var (
-		loop     = flag.Bool("loop", false, "Loop playback continuously")
-		bindAddr = flag.String("bind", "127.0.0.1:6721", "Host:port to bind HTTP server to")
-	)
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <replay-file> [replay-file...]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nOptions:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nReplay files can be .echoreplay (zip) or .rtapi (protobuf) format.\n")
-	}
-	flag.Parse()
+func newReplayerCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "replay [replay-file...]",
+		Short: "Replay recorded sessions via HTTP server",
+		Long: `The replay command starts an HTTP server that plays back recorded 
+session data from .echoreplay files.`,
+		Example: `  # Replay a single file
+	  agent replay game.echoreplay
 
-	if flag.NArg() == 0 {
-		flag.Usage()
-		os.Exit(1)
+  # Replay multiple files in sequence
+	  agent replay game1.echoreplay game2.echoreplay
+
+  # Replay in loop mode
+	  agent replay --loop game.echoreplay
+
+  # Custom bind address
+	  agent replay --bind 0.0.0.0:8080 game.echoreplay`,
+		RunE: runReplayer,
+		Args: cobra.MinimumNArgs(1),
 	}
 
-	files := flag.Args()
-	for _, file := range files {
-		if _, err := os.Stat(file); os.IsNotExist(err) {
-			log.Fatalf("File does not exist: %s", file)
-		}
+	// Replayer-specific flags
+	cmd.Flags().String("bind", "127.0.0.1:6721", "Host:port to bind HTTP server to")
+	cmd.Flags().Bool("loop", false, "Loop playback continuously")
+
+	// Bind flags to viper
+	viper.BindPFlags(cmd.Flags())
+
+	return cmd
+}
+
+func runReplayer(cmd *cobra.Command, args []string) error {
+	// Override config with command flags
+	cfg.Replayer.BindAddress = viper.GetString("bind")
+	cfg.Replayer.Loop = viper.GetBool("loop")
+	cfg.Replayer.Files = args
+
+	// Validate configuration
+	if err := cfg.ValidateReplayerConfig(); err != nil {
+		return err
 	}
+
+	logger.Info("Starting replayer",
+		zap.String("bind_address", cfg.Replayer.BindAddress),
+		zap.Bool("loop", cfg.Replayer.Loop),
+		zap.Strings("files", cfg.Replayer.Files))
 
 	server := &ReplayServer{
-		files:    files,
-		loop:     *loop,
-		bindAddr: *bindAddr,
+		files:    cfg.Replayer.Files,
+		loop:     cfg.Replayer.Loop,
+		bindAddr: cfg.Replayer.BindAddress,
 	}
 
 	// Start playback in background
 	go server.playback()
 
-	// Setup HTTP handlers
-	http.HandleFunc("/", server.handleRoot)
-	http.HandleFunc("/frame", server.handleFrame)
-	http.HandleFunc("/session", server.handleSession)
-	http.HandleFunc("/player_bones", server.handlePlayerBones)
-	http.HandleFunc("/status", server.handleStatus)
+	// Create a dedicated ServeMux instead of using the default one
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", server.handleRoot)
+	mux.HandleFunc("/frame", server.handleFrame)
+	mux.HandleFunc("/session", server.handleSession)
+	mux.HandleFunc("/player_bones", server.handlePlayerBones)
+	mux.HandleFunc("/status", server.handleStatus)
 
-	log.Printf("Starting replay server on %s", *bindAddr)
-	log.Printf("Files: %v", files)
-	log.Printf("Loop: %v", *loop)
-	log.Printf("Endpoints:")
-	log.Printf("  GET /        - Current frame (HTML)")
-	log.Printf("  GET /frame    - Current frame data (JSON)")
-	log.Printf("  GET /session   - Current session data from frame (JSON)")
-	log.Printf("  GET /player_bones - Current player bone data from frame (JSON)")
-	log.Printf("  GET /status  - Server status (JSON)")
+	logger.Info("Replay server started",
+		zap.String("address", cfg.Replayer.BindAddress),
+		zap.Strings("files", cfg.Replayer.Files),
+		zap.Bool("loop", cfg.Replayer.Loop))
+	logger.Info("Available endpoints",
+		zap.String("GET /", "Current frame (HTML)"),
+		zap.String("GET /frame", "Current frame data (JSON)"),
+		zap.String("GET /session", "Current session data (JSON)"),
+		zap.String("GET /player_bones", "Current player bone data (JSON)"),
+		zap.String("GET /status", "Server status (JSON)"))
 
-	if err := http.ListenAndServe(*bindAddr, nil); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	if err := http.ListenAndServe(cfg.Replayer.BindAddress, mux); err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
 	}
+
+	return nil
 }
 
 func (rs *ReplayServer) playback() {
 	for {
 		for _, file := range rs.files {
-			log.Printf("Playing file: %s", file)
+			logger.Info("Playing file", zap.String("file", file))
 			rs.mu.Lock()
 			rs.isPlaying = true
 			rs.frameCount = 0
@@ -113,7 +140,7 @@ func (rs *ReplayServer) playback() {
 			rs.mu.Unlock()
 
 			if err := rs.playFile(file); err != nil {
-				log.Printf("Error playing file %s: %v", file, err)
+				logger.Error("Error playing file", zap.String("file", file), zap.Error(err))
 			}
 		}
 
@@ -122,11 +149,11 @@ func (rs *ReplayServer) playback() {
 		rs.mu.Unlock()
 
 		if !rs.loop {
-			log.Printf("Playback finished")
+			logger.Info("Playback finished")
 			break
 		}
 
-		log.Printf("Looping playback...")
+		logger.Info("Looping playback...")
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -137,8 +164,6 @@ func (rs *ReplayServer) playFile(filename string) error {
 	switch ext {
 	case ".echoreplay":
 		return rs.playEchoReplayFile(filename)
-	case ".rtapi":
-		return fmt.Errorf("not implemented")
 	default:
 		return fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -153,60 +178,25 @@ func (rs *ReplayServer) playEchoReplayFile(filename string) error {
 
 	var lastTimestamp time.Time
 
-	for {
+	for reader.HasNext() {
 		frame, err := reader.ReadFrame()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				break
 			}
 			return fmt.Errorf("failed to read frame: %w", err)
 		}
 
 		// Calculate delay for 1x playback speed
-		if !lastTimestamp.IsZero() {
+		if !lastTimestamp.IsZero() && frame.GetTimestamp() != nil {
 			delay := frame.GetTimestamp().AsTime().Sub(lastTimestamp)
 			if delay > 0 && delay < 10*time.Second { // Cap max delay
 				time.Sleep(delay)
 			}
 		}
-		lastTimestamp = frame.GetTimestamp().AsTime()
-
-		// Update current frame
-		rs.mu.Lock()
-		rs.currentFrame = frame
-		rs.frameCount++
-		rs.mu.Unlock()
-	}
-
-	return nil
-}
-
-func (rs *ReplayServer) playNevrCapFile(filename string) error {
-	reader, err := codecs.NewEchoReplayReader(filename)
-	if err != nil {
-		return fmt.Errorf("failed to open rtapi file: %w", err)
-	}
-	defer reader.Close()
-
-	var lastTimestamp time.Time
-
-	for {
-		frame, err := reader.ReadFrame()
-		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			return fmt.Errorf("failed to read frame: %w", err)
+		if frame.GetTimestamp() != nil {
+			lastTimestamp = frame.GetTimestamp().AsTime()
 		}
-
-		// Calculate delay for 1x playback speed
-		if !lastTimestamp.IsZero() {
-			delay := frame.Timestamp.AsTime().Sub(lastTimestamp)
-			if delay > 0 && delay < 10*time.Second { // Cap max delay
-				time.Sleep(delay)
-			}
-		}
-		lastTimestamp = frame.Timestamp.AsTime()
 
 		// Update current frame
 		rs.mu.Lock()
@@ -332,7 +322,10 @@ func (rs *ReplayServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	rs.mu.RLock()
-	var frameData = rs.currentFrame.GetSession()
+	var frameData *apigame.SessionResponse
+	if rs.currentFrame != nil {
+		frameData = rs.currentFrame.GetSession()
+	}
 	rs.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -350,6 +343,7 @@ func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": err.Error(),
 		})
+		return
 	}
 
 	w.Write(data)
@@ -357,7 +351,10 @@ func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (rs *ReplayServer) handlePlayerBones(w http.ResponseWriter, r *http.Request) {
 	rs.mu.RLock()
-	var boneData = rs.currentFrame.GetPlayerBones()
+	var boneData *apigame.PlayerBonesResponse
+	if rs.currentFrame != nil {
+		boneData = rs.currentFrame.GetPlayerBones()
+	}
 	rs.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -375,11 +372,16 @@ func (rs *ReplayServer) handlePlayerBones(w http.ResponseWriter, r *http.Request
 	encoder.Encode(boneData)
 }
 
-func (rs *ReplayServer) buildFrameResponse(frame *rtapi.LobbySessionStateFrame, frameCount int64, startTime time.Time) (*FrameResponse, error) {
+func (rs *ReplayServer) buildFrameResponse(frame *telemetry.LobbySessionStateFrame, frameCount int64, startTime time.Time) (*FrameResponse, error) {
+	timestamp := ""
+	if frame.GetTimestamp() != nil {
+		timestamp = frame.GetTimestamp().AsTime().Format(time.RFC3339Nano)
+	}
+
 	response := &FrameResponse{
 		SessionData:    frame.GetSession(),
 		PlayerBoneData: frame.GetPlayerBones(),
-		Timestamp:      frame.GetTimestamp().AsTime().Format(time.RFC3339Nano),
+		Timestamp:      timestamp,
 		FrameNumber:    frameCount,
 		ElapsedTime:    time.Since(startTime).String(),
 		IsPlaying:      rs.isPlaying,

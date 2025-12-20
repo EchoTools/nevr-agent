@@ -1,0 +1,117 @@
+# GraphQL schema for EVR Data Recorder API v3
+
+scalar Time
+scalar JSON
+
+"""
+A lobby session containing match data and events
+"""
+type LobbySession {
+  id: ID!
+  lobbySessionId: String!
+  events(limit: Int, offset: Int): SessionEventConnection!
+  totalEvents: Int!
+  createdAt: Time
+  updatedAt: Time
+}
+
+"""
+A single session event (frame) within a lobby session
+"""
+type SessionEvent {
+  id: ID!
+  lobbySessionId: String!
+  userId: String
+  frameData: JSON
+  timestamp: Time!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+"""
+Paginated connection for session events
+"""
+type SessionEventConnection {
+  edges: [SessionEventEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+"""
+Edge type for session event pagination
+"""
+type SessionEventEdge {
+  node: SessionEvent!
+  cursor: String!
+}
+
+"""
+Pagination information
+"""
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+"""
+Query root for the EVR Data Recorder API
+"""
+type Query {
+  """
+  Get a lobby session by its ID
+  """
+  lobbySession(id: ID!): LobbySession
+  
+  """
+  Get session events for a specific lobby session with pagination
+  """
+  sessionEvents(
+    lobbySessionId: ID!
+    limit: Int = 100
+    offset: Int = 0
+  ): SessionEventConnection!
+  
+  """
+  Health check query
+  """
+  health: HealthStatus!
+}
+
+"""
+Health status response
+"""
+type HealthStatus {
+  status: String!
+  timestamp: Time!
+  database: String!
+}
+
+"""
+Input type for storing a new session event
+"""
+input StoreSessionEventInput {
+  lobbySessionId: ID!
+  userId: String
+  frameData: JSON!
+}
+
+"""
+Response type for storing a session event
+"""
+type StoreSessionEventPayload {
+  success: Boolean!
+  event: SessionEvent
+  error: String
+}
+
+"""
+Mutation root for the EVR Data Recorder API
+"""
+type Mutation {
+  """
+  Store a new session event
+  """
+  storeSessionEvent(input: StoreSessionEventInput!): StoreSessionEventPayload!
+}

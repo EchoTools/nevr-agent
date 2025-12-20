@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	rtapi "github.com/echotools/nevr-common/v4/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"go.uber.org/zap"
 )
 
@@ -20,13 +20,13 @@ func testLogger(t testing.TB) *zap.Logger {
 }
 
 type benchmarkWriter struct {
-	frames []*rtapi.LobbySessionStateFrame
+	frames []*telemetry.LobbySessionStateFrame
 }
 
 func (test *benchmarkWriter) Context() context.Context {
 	return context.Background()
 }
-func (b *benchmarkWriter) WriteFrame(frame *rtapi.LobbySessionStateFrame) error {
+func (b *benchmarkWriter) WriteFrame(frame *telemetry.LobbySessionStateFrame) error {
 	b.frames = append(b.frames, frame)
 	return nil
 }
@@ -65,10 +65,10 @@ func BenchmarkNewFrameLogger_TwoURLs_32KB_MaxPollingRate(b *testing.B) {
 	defer cancel()
 
 	benchWriter := &benchmarkWriter{
-		frames: make([]*rtapi.LobbySessionStateFrame, 0, b.N*2), // Preallocate space for frames
+		frames: make([]*telemetry.LobbySessionStateFrame, 0, b.N*2), // Preallocate space for frames
 	}
 
-	NewHTTPFramePoller(ctx, testLogger, http.DefaultClient, srv1.URL, interval, benchWriter)
+	NewHTTPFramePoller(ctx, testLogger, http.DefaultClient, srv1.URL, interval, benchWriter, PollerConfig{})
 
 	b.Logf("Warmed up channel, ready for benchmark with %d frames", b.N)
 

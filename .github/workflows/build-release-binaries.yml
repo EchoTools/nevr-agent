@@ -31,7 +31,7 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
+          VERSION=$(git describe --tags --match 'v[0-9]*' --long --always --dirty --abbrev=7 2>/dev/null || echo v0.0.0-0-g0000000)
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
@@ -49,12 +49,10 @@ jobs:
             EXT=".exe"
           fi
           
-          # Build each command
-          for cmd in agent apiserver converter dumpevents replayer webviewer; do
-            OUTPUT_NAME="${cmd}_${VERSION}_${GOOS}_${GOARCH}${EXT}"
-            echo "Building $OUTPUT_NAME"
-            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/$cmd
-          done
+          # Build the consolidated binary
+          OUTPUT_NAME="agent_${VERSION}_${GOOS}_${GOARCH}${EXT}"
+          echo "Building $OUTPUT_NAME"
+          GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "$OUTPUT_NAME" ./cmd/agent
 
       - name: List built files
         run: ls -lah *_${{ steps.version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}*

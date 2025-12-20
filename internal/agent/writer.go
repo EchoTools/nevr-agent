@@ -4,20 +4,20 @@ import (
 	"context"
 	"fmt"
 
-	rtapi "github.com/echotools/nevr-common/v4/gen/go/rtapi"
+	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"go.uber.org/zap"
 )
 
 type FrameWriter interface {
 	Context() context.Context
-	WriteFrame(*rtapi.LobbySessionStateFrame) error
+	WriteFrame(*telemetry.LobbySessionStateFrame) error
 	Close()
 	IsStopped() bool
 }
 
 type FrameReader interface {
 	Context() context.Context
-	ReadFrame() (*rtapi.LobbySessionStateFrame, error)
+	ReadFrame() (*telemetry.LobbySessionStateFrame, error)
 	Close()
 }
 
@@ -49,7 +49,7 @@ func (mw *MultiWriter) Context() context.Context {
 }
 
 // WriteFrame writes frame data to all underlying writers
-func (mw *MultiWriter) WriteFrame(frame *rtapi.LobbySessionStateFrame) error {
+func (mw *MultiWriter) WriteFrame(frame *telemetry.LobbySessionStateFrame) error {
 	if mw.stopped {
 		return fmt.Errorf("multi writer is stopped")
 	}

@@ -1,48 +1,55 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
 LDFLAGS = -X main.version=$(VERSION) -s -w
 
-# Binaries under cmd/
-CMDS := agent apiserver converter dumpevents replayer webviewer
+# Main consolidated binary
+BINARY := agent
 
 # OS detection
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 
 # Windows-specific variables
-WINDOWS_CMDS := $(addsuffix .exe,$(CMDS))
+WINDOWS_BINARY := $(BINARY).exe
 
-.PHONY: all version cmds windows linux $(CMDS) $(WINDOWS_CMDS) bench test clean build-% build-%-windows
+.PHONY: all version build windows linux clean test bench lint install-hooks
 
-all: cmds
+all: build
 
 version:
 	@echo $(VERSION)
 
-# Build all cmd/* binaries for current OS
-cmds: $(CMDS)
+# Install git hooks
+install-hooks:
+	@echo "Installing git hooks..."
+	cp scripts/pre-commit .git/hooks/pre-commit
+	chmod +x .git/hooks/pre-commit
+	@echo "Git hooks installed."
 
-# Build all cmd/* binaries for Windows
-windows: $(WINDOWS_CMDS)
+# Run linting
+lint:
+	@echo "Running linters..."
+	go fmt ./...
+	go vet ./...
 
-# Build all cmd/* binaries for Linux
-linux: GOOS=linux
-linux: $(CMDS)
+# Run smoke tests only
+smoke-test:
+	@echo "Running smoke tests..."
+	go test -v -short -run "^TestCLI" ./cmd/agent/...
 
-# Individual cmd/* targets (phony wrappers)
-$(CMDS): %: build-%
+# Build the main consolidated binary
+build:
+	@echo "Building $(BINARY) for $(GOOS)/$(GOARCH) (version=$(VERSION))"
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agent
 
-# Individual Windows targets
-$(WINDOWS_CMDS): %.exe: build-%-windows
+# Build for Windows
+windows:
+	@echo "Building $(WINDOWS_BINARY) for windows/amd64 (version=$(VERSION))"
+	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(WINDOWS_BINARY) ./cmd/agent
 
-# Pattern rule to build a cmd/* binary for current/specified OS
-build-%:
-	@echo "Building $* for $(GOOS)/$(GOARCH) (version=$(VERSION))"
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o $* ./cmd/$*
-
-# Pattern rule to build a cmd/* binary for Windows
-build-%-windows:
-	@echo "Building $*.exe for windows/amd64 (version=$(VERSION))"
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $*.exe ./cmd/$*
+# Build for Linux
+linux:
+	@echo "Building $(BINARY) for linux/amd64 (version=$(VERSION))"
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agent
 
 bench:
 	go test -bench=. -benchmem ./...
@@ -51,4 +58,4 @@ test:
 	go test ./...
 
 clean:
-	rm -f $(CMDS) $(WINDOWS_CMDS)
+	rm -f $(BINARY) $(WINDOWS_BINARY)

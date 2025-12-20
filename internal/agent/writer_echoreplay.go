@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-common/v4/gen/go/rtapi"
-	"github.com/echotools/nevrcap/pkg/codecs"
+	"github.com/echotools/nevr-capture/v3/pkg/codecs"
+	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"go.uber.org/zap"
 )
 
@@ -31,7 +31,7 @@ type FrameDataLogSession struct {
 	logger      *zap.Logger
 
 	filePath   string
-	outgoingCh chan *rtapi.LobbySessionStateFrame
+	outgoingCh chan *telemetry.LobbySessionStateFrame
 	buf        *bytes.Buffer
 
 	sessionID string // Session ID for the current session
@@ -50,7 +50,7 @@ func NewFrameDataLogSession(ctx context.Context, logger *zap.Logger, filePath st
 		logger:      logger,
 
 		filePath:   filePath,
-		outgoingCh: make(chan *rtapi.LobbySessionStateFrame, 1000), // Buffered channel for outgoing frames
+		outgoingCh: make(chan *telemetry.LobbySessionStateFrame, 1000), // Buffered channel for outgoing frames
 		buf:        bytes.NewBuffer(make([]byte, 0, 64*1024)),
 		sessionID:  sessionID, // Initialize with the provided session ID
 	}
@@ -179,7 +179,7 @@ OuterLoop:
 	return nil
 }
 
-func (fw *FrameDataLogSession) WriteFrame(frame *rtapi.LobbySessionStateFrame) error {
+func (fw *FrameDataLogSession) WriteFrame(frame *telemetry.LobbySessionStateFrame) error {
 	if fw.IsStopped() {
 		return fmt.Errorf("frame writer is stopped")
 	}

@@ -1,0 +1,40 @@
+# gqlgen configuration for EVR Data Recorder API
+
+schema:
+  - internal/api/graph/*.graphql
+
+exec:
+  filename: internal/api/graph/generated.go
+  package: graph
+
+model:
+  filename: internal/api/graph/models_gen.go
+  package: graph
+
+resolver:
+  layout: follow-schema
+  dir: internal/api/graph
+  package: graph
+  filename_template: "{name}.resolvers.go"
+
+autobind:
+  - github.com/echotools/nevr-agent/v4/internal/api/graph/model
+
+models:
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+  Int:
+    model:
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+  Time:
+    model:
+      - github.com/99designs/gqlgen/graphql.Time
+  JSON:
+    model:
+      - github.com/99designs/gqlgen/graphql.Map

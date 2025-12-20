@@ -25,14 +25,16 @@
 go.work
 go.work.sum
 
-# env file
+# Environment files - .env contains secrets, .env.example is template
 .env
+.env.compose
+
+# Log files
+agent.log
 
 # binary
 /agent
-/replayer
-/converter
-/apiserver
-/dumpevents
-/webviewer
+/agent.exe
+/validator
 output/
+recordings/

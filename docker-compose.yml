@@ -1,0 +1,74 @@
+version: '3.8'
+
+# Note: Environment variables are loaded from .env file
+# Copy .env.example to .env and customize values
+
+services:
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${MONGODB_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-mongodb_password}
+      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE:-nakama}
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - lobby-session-events-network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-rabbitmq_password}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - lobby-session-events-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  session-data-api:
+    image: ${SESSION_DATA_API_IMAGE:-ghcr.io/echotools/nevr-agent:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      EVR_APISERVER_MONGO_URI: mongodb://${MONGODB_USER:-admin}:${MONGODB_PASSWORD:-mongodb_password}@mongodb:27017/${MONGODB_DATABASE:-nakama}?authSource=admin
+      EVR_APISERVER_SERVER_ADDRESS: :8080
+      EVR_APISERVER_AMQP_URI: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-rabbitmq_password}@rabbitmq:5672/
+      EVR_APISERVER_AMQP_ENABLED: ${AMQP_ENABLED:-true}
+      EVR_APISERVER_CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    depends_on:
+      mongodb:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - lobby-session-events-network
+
+volumes:
+  mongodb_data:
+  rabbitmq_data:
+
+networks:
+  lobby-session-events-network:
+    driver: bridge
