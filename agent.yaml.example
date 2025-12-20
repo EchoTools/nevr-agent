@@ -14,6 +14,9 @@ agent:
   format: nevrcap,stream
   output_directory: ./output
   
+  # JWT token for authenticating with the events/stream API
+  jwt_token: ""
+  
   # Frame filtering options
   all_frames: false           # Send all frames, not just event frames
   fps: 0                      # Target FPS (0 = use polling frequency)

@@ -26,6 +26,7 @@ type StreamConfig struct {
 	Events        bool
 	EventsStream  bool
 	EventsURL     string
+	JWTToken      string   // JWT token for API authentication
 	AllFrames     bool     // Send all frames, not just event frames
 	FPS           int      // Target frames per second for streaming
 	IncludeModes  []string // Only stream these game modes
@@ -44,6 +45,7 @@ func newAgentCommand() *cobra.Command {
 		events        bool
 		eventsStream  bool
 		eventsURL     string
+		jwtToken      string
 		allFrames     bool
 		fps           int
 		includeModes  []string
@@ -77,13 +79,14 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
   agent stream --include-modes echo_arena --active-only 127.0.0.1:6721`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			streamCfg := StreamConfig{
+				streamCfg := StreamConfig{
 				Frequency:     frequency,
 				Format:        format,
 				OutputDir:     outputDir,
 				Events:        events,
 				EventsStream:  eventsStream,
 				EventsURL:     eventsURL,
+				JWTToken:      jwtToken,
 				AllFrames:     allFrames,
 				FPS:           fps,
 				IncludeModes:  includeModes,
@@ -106,6 +109,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 	cmd.Flags().BoolVar(&events, "events", false, "Enable sending frames to events API")
 	cmd.Flags().BoolVar(&eventsStream, "events-stream", false, "Enable streaming frames to events API via WebSocket")
 	cmd.Flags().StringVar(&eventsURL, "events-url", "http://localhost:8081", "Base URL of the events API")
+	cmd.Flags().StringVar(&jwtToken, "jwt-token", "", "JWT token for API authentication")
 
 	// Stream filtering options
 	cmd.Flags().BoolVar(&allFrames, "all-frames", false, "Send all frames, not just frames with events")
@@ -300,7 +304,8 @@ OuterLoop:
 
 				// If events sending is enabled, add EventsAPI writer
 				if cfg.Agent.EventsEnabled {
-					eventsWriter := agent.NewEventsAPIWriter(logger, streamCfg.EventsURL, cfg.Agent.JWTToken)
+					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
+					eventsWriter := agent.NewEventsAPIWriter(logger, streamCfg.EventsURL, token)
 					writers = append(writers, eventsWriter)
 				}
 				// If events streaming is enabled, add WebSocket writer
@@ -312,7 +317,8 @@ OuterLoop:
 					}
 					wsURL = strings.TrimSuffix(wsURL, "/") + "/v3/stream"
 
-					wsWriter := agent.NewWebSocketWriter(logger, wsURL, cfg.Agent.JWTToken)
+					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
+					wsWriter := agent.NewWebSocketWriter(logger, wsURL, token)
 					if err := wsWriter.Connect(); err != nil {
 						logger.Error("Failed to connect WebSocket writer", zap.Error(err))
 					} else {
@@ -425,4 +431,15 @@ func parsePortRange(port string) ([]int, error) {
 		}
 	}
 	return ports, nil
+}
+
+// resolveJWTToken returns the first non-empty JWT token from the provided values.
+// Priority: CLI flag > config file > empty string
+func resolveJWTToken(tokens ...string) string {
+	for _, token := range tokens {
+		if token != "" {
+			return token
+		}
+	}
+	return ""
 }
