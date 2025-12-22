@@ -68,6 +68,9 @@ type APIServerConfig struct {
 
 	// Metrics
 	MetricsAddr string `yaml:"metrics_addr"` // Prometheus metrics endpoint address
+
+	// Node identifier for this agent instance
+	NodeID string `yaml:"node_id"`
 }
 
 // ConverterConfig holds configuration for the converter subcommand
@@ -111,6 +114,7 @@ func DefaultConfig() *Config {
 			MaxStreamHz:      60,
 			CORSOrigins:      "*",
 			MetricsAddr:      "",
+			NodeID:           "", // Will use hostname if empty
 		},
 		Converter: ConverterConfig{
 			OutputDir: "./",
@@ -204,6 +208,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := getEnv("APISERVER_CORS_ORIGINS"); v != "" {
 		c.APIServer.CORSOrigins = v
+	}
+	if v := getEnv("APISERVER_NODE_ID"); v != "" {
+		c.APIServer.NodeID = v
 	}
 	// AMQP configuration
 	if v := getEnv("APISERVER_AMQP_ENABLED"); v != "" {

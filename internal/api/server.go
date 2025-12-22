@@ -34,6 +34,7 @@ type Server struct {
 	corsHandler     *cors.Cors
 	amqpPublisher   *amqp.Publisher
 	jwtSecret       string
+	nodeID          string
 	frameCount      atomic.Int64
 	streamHub       *StreamHub
 	storageManager  *StorageManager
@@ -74,16 +75,23 @@ func (s *Server) SetAMQPPublisher(publisher *amqp.Publisher) {
 
 // NewServer creates a new session events HTTP server
 func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Server {
-	return NewServerWithStorage(mongoClient, logger, jwtSecret, nil, 60)
+	return NewServerWithStorage(mongoClient, logger, jwtSecret, nil, 60, "")
 }
 
 // NewServerWithStorage creates a new session events HTTP server with storage support
-func NewServerWithStorage(mongoClient *mongo.Client, logger Logger, jwtSecret string, storage *StorageManager, maxFrameRate int) *Server {
+func NewServerWithStorage(mongoClient *mongo.Client, logger Logger, jwtSecret string, storage *StorageManager, maxFrameRate int, nodeID string) *Server {
 	if logger == nil {
 		logger = &DefaultLogger{}
 	}
 	if maxFrameRate <= 0 {
 		maxFrameRate = 60
+	}
+	if nodeID == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			nodeID = hostname
+		} else {
+			nodeID = "default-node"
+		}
 	}
 
 	router := mux.NewRouter()
@@ -96,6 +104,7 @@ func NewServerWithStorage(mongoClient *mongo.Client, logger Logger, jwtSecret st
 		graphqlResolver: graph.NewResolver(mongoClient),
 		corsHandler:     createCORSHandler(),
 		jwtSecret:       jwtSecret,
+		nodeID:          nodeID,
 		storageManager:  storage,
 		streamHub:       NewStreamHub(storage, logger, nil, maxFrameRate, nil),
 	}

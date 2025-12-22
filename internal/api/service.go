@@ -41,6 +41,9 @@ type Config struct {
 	// Metrics
 	MetricsAddr string `json:"metrics_addr" yaml:"metrics_addr"`
 
+	// Node identifier for this agent instance
+	NodeID string `json:"node_id" yaml:"node_id"`
+
 	// Optional timeouts
 	MongoTimeout  time.Duration `json:"mongo_timeout" yaml:"mongo_timeout"`
 	ServerTimeout time.Duration `json:"server_timeout" yaml:"server_timeout"`
@@ -68,6 +71,16 @@ func DefaultConfig() *Config {
 
 	jwtSecret := os.Getenv("EVR_APISERVER_JWT_SECRET")
 
+	nodeID := os.Getenv("EVR_APISERVER_NODE_ID")
+	if nodeID == "" {
+		// Generate a default node ID from hostname
+		if hostname, err := os.Hostname(); err == nil {
+			nodeID = hostname
+		} else {
+			nodeID = "default-node"
+		}
+	}
+
 	return &Config{
 		MongoURI:         mongoURI,
 		DatabaseName:     sessionEventDatabaseName,
@@ -82,6 +95,7 @@ func DefaultConfig() *Config {
 		CaptureMaxSize:   10 * 1024 * 1024 * 1024, // 10GB
 		MaxStreamHz:      60,
 		MetricsAddr:      "",
+		NodeID:           nodeID,
 		MongoTimeout:     10 * time.Second,
 		ServerTimeout:    30 * time.Second,
 	}
@@ -186,7 +200,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 	}
 
 	// Create HTTP server with storage manager
-	s.server = NewServerWithStorage(s.mongoClient, s.logger, s.config.JWTSecret, s.storageManager, s.config.MaxStreamHz)
+	s.server = NewServerWithStorage(s.mongoClient, s.logger, s.config.JWTSecret, s.storageManager, s.config.MaxStreamHz, s.config.NodeID)
 
 	// Set the AMQP publisher on the server if available
 	if s.amqpPublisher != nil {
