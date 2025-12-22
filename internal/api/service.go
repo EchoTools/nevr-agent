@@ -101,9 +101,7 @@ func (c *Config) Validate() error {
 	if c.ServerAddress == "" {
 		return fmt.Errorf("server_address is required")
 	}
-	if c.JWTSecret == "" {
-		return fmt.Errorf("jwt_secret is required")
-	}
+	// JWT secret is optional - if not set, authentication is disabled
 	if c.AMQPEnabled && c.AMQPURI == "" {
 		return fmt.Errorf("amqp_uri is required when AMQP is enabled")
 	}

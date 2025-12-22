@@ -65,7 +65,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
   agent stream --frequency 30 --output ./output 127.0.0.1:6721-6730
 
   # Stream to events API without saving files locally
-  agent stream --format none --events-stream --events-url ws://localhost:8081/v3/stream 127.0.0.1:6721
+  agent stream --format none --events-stream --events-url ws://localhost:8081/ws 127.0.0.1:6721
 
   # Use a config file
   agent stream -c config.yaml 127.0.0.1:6721
@@ -104,7 +104,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 
 	// Events API options
 	cmd.Flags().BoolVar(&eventsStream, "events-stream", false, "Enable streaming frames to events API via WebSocket")
-	cmd.Flags().StringVar(&eventsURL, "events-url", "ws://localhost:8081/v3/stream", "Full WebSocket URL for streaming events")
+	cmd.Flags().StringVar(&eventsURL, "events-url", "ws://localhost:8081/ws", "Full WebSocket URL for streaming events")
 	cmd.Flags().StringVar(&jwtToken, "jwt-token", "", "JWT token for API authentication")
 
 	// Stream filtering options
@@ -206,6 +206,7 @@ func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
 }
 
 func startAgent(ctx context.Context, logger *zap.Logger, targets map[string][]int, streamCfg StreamConfig) {
+	baseLogger := logger // Keep reference to base logger for WebSocket writer
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
@@ -318,7 +319,7 @@ OuterLoop:
 				if streamCfg.EventsStream {
 					wsURL := streamCfg.EventsURL
 					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
-					wsWriter := agent.NewWebSocketWriter(logger, wsURL, token)
+					wsWriter := agent.NewWebSocketWriter(baseLogger, wsURL, token)
 					if err := wsWriter.Connect(); err != nil {
 						logger.Error("Failed to connect WebSocket writer", zap.Error(err))
 					} else {
