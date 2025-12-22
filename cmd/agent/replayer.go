@@ -14,7 +14,6 @@ import (
 	"github.com/echotools/nevr-common/v4/gen/go/apigame"
 	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -47,6 +46,11 @@ type FrameResponse struct {
 	IsPlaying      bool                         `json:"is_playing"`
 }
 
+var (
+	replayBind string
+	replayLoop bool
+)
+
 func newReplayerCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replay [replay-file...]",
@@ -69,19 +73,20 @@ session data from .echoreplay files.`,
 	}
 
 	// Replayer-specific flags
-	cmd.Flags().String("bind", "127.0.0.1:6721", "Host:port to bind HTTP server to")
-	cmd.Flags().Bool("loop", false, "Loop playback continuously")
-
-	// Bind flags to viper
-	viper.BindPFlags(cmd.Flags())
+	cmd.Flags().StringVar(&replayBind, "bind", "127.0.0.1:6721", "Host:port to bind HTTP server to")
+	cmd.Flags().BoolVar(&replayLoop, "loop", false, "Loop playback continuously")
 
 	return cmd
 }
 
 func runReplayer(cmd *cobra.Command, args []string) error {
-	// Override config with command flags
-	cfg.Replayer.BindAddress = viper.GetString("bind")
-	cfg.Replayer.Loop = viper.GetBool("loop")
+	// Use flag values directly, with config file as fallback
+	if cmd.Flags().Changed("bind") {
+		cfg.Replayer.BindAddress = replayBind
+	}
+	if cmd.Flags().Changed("loop") {
+		cfg.Replayer.Loop = replayLoop
+	}
 	cfg.Replayer.Files = args
 
 	// Validate configuration

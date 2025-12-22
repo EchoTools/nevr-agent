@@ -12,8 +12,17 @@ import (
 	"github.com/echotools/nevr-capture/v3/pkg/conversion"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
+)
+
+var (
+	convInputFile    string
+	convOutputFile   string
+	convOutputDir    string
+	convFormat       string
+	convVerbose      bool
+	convOverwrite    bool
+	convShowProgress bool
 )
 
 func newConverterCommand() *cobra.Command {
@@ -40,31 +49,27 @@ func newConverterCommand() *cobra.Command {
 	}
 
 	// Converter-specific flags
-	cmd.Flags().StringP("input", "i", "", "Input file path (.echoreplay or .nevrcap) (required)")
-	cmd.Flags().StringP("output", "o", "", "Output file path (optional, format detected from extension)")
-	cmd.Flags().String("output-dir", "./", "Output directory for converted files")
-	cmd.Flags().StringP("format", "f", "auto", "Output format: auto, echoreplay, nevrcap")
-	cmd.Flags().BoolP("verbose", "v", false, "Enable verbose logging")
-	cmd.Flags().Bool("overwrite", false, "Overwrite existing output files")
-	cmd.Flags().BoolP("progress", "p", false, "Show progress bar during conversion")
+	cmd.Flags().StringVarP(&convInputFile, "input", "i", "", "Input file path (.echoreplay or .nevrcap) (required)")
+	cmd.Flags().StringVarP(&convOutputFile, "output", "o", "", "Output file path (optional, format detected from extension)")
+	cmd.Flags().StringVar(&convOutputDir, "output-dir", "./", "Output directory for converted files")
+	cmd.Flags().StringVarP(&convFormat, "format", "f", "auto", "Output format: auto, echoreplay, nevrcap")
+	cmd.Flags().BoolVarP(&convVerbose, "verbose", "v", false, "Enable verbose logging")
+	cmd.Flags().BoolVar(&convOverwrite, "overwrite", false, "Overwrite existing output files")
+	cmd.Flags().BoolVarP(&convShowProgress, "progress", "p", false, "Show progress bar during conversion")
 
 	cmd.MarkFlagRequired("input")
-
-	// Bind flags to viper
-	viper.BindPFlags(cmd.Flags())
 
 	return cmd
 }
 
 func runConverter(cmd *cobra.Command, args []string) error {
-	// Override config with command flags
-	cfg.Converter.InputFile = viper.GetString("input")
-	cfg.Converter.OutputFile = viper.GetString("output")
-	cfg.Converter.OutputDir = viper.GetString("output-dir")
-	cfg.Converter.Format = viper.GetString("format")
-	cfg.Converter.Verbose = viper.GetBool("verbose")
-	cfg.Converter.Overwrite = viper.GetBool("overwrite")
-	showProgress := viper.GetBool("progress")
+	// Use flag values directly
+	cfg.Converter.InputFile = convInputFile
+	cfg.Converter.OutputFile = convOutputFile
+	cfg.Converter.OutputDir = convOutputDir
+	cfg.Converter.Format = convFormat
+	cfg.Converter.Verbose = convVerbose
+	cfg.Converter.Overwrite = convOverwrite
 
 	// Validate configuration
 	if err := cfg.ValidateConverterConfig(); err != nil {
@@ -96,7 +101,7 @@ func runConverter(cmd *cobra.Command, args []string) error {
 	}
 
 	// Perform conversion
-	stats, err := convertFile(cfg.Converter.InputFile, outputFile, showProgress)
+	stats, err := convertFile(cfg.Converter.InputFile, outputFile, convShowProgress)
 	if err != nil {
 		return fmt.Errorf("conversion failed: %w", err)
 	}
