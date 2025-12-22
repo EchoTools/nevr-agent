@@ -62,9 +62,10 @@ func (w *WebSocketWriter) Connect() error {
 		return fmt.Errorf("invalid socket URL: %w", err)
 	}
 
-	if u.Scheme == "http" {
+	switch u.Scheme {
+	case "http":
 		u.Scheme = "ws"
-	} else if u.Scheme == "https" {
+	case "https":
 		u.Scheme = "wss"
 	}
 
@@ -82,6 +83,8 @@ func (w *WebSocketWriter) Connect() error {
 
 	w.conn = conn
 	w.connected = true
+
+	w.logger.Debug("WebSocket connection established, starting background routines", zap.String("url", u.String()))
 
 	// Start background routines
 	go w.readLoop()
@@ -197,6 +200,13 @@ func (w *WebSocketWriter) writeLoop() {
 			w.mu.Unlock()
 
 		case frame := <-w.outgoingCh:
+			// Log event count for debugging
+			if len(frame.Events) > 0 {
+				w.logger.Debug("Sending frame with events",
+					zap.Int("event_count", len(frame.Events)),
+					zap.Uint32("frame_index", frame.FrameIndex))
+			}
+
 			// Wrap frame in Envelope
 			envelope := &telemetry.Envelope{
 				Message: &telemetry.Envelope_Frame{

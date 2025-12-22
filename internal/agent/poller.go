@@ -94,7 +94,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		wg                sync.WaitGroup
 		sessionURL        = EndpointSession(baseURL)
 		playerBonesURL    = EndpointPlayerBones(baseURL)
-		processor         = processing.NewWithDetector(events.New(events.WithSynchronousProcessing()))
+		processor         = processing.NewWithDetector(events.NewWithDefaultSensors(events.WithSynchronousProcessing()))
 		sessionBuffer     = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
 		playerBonesBuffer = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
 		lastGameStatus    string
@@ -196,6 +196,9 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		select {
 		case detectedEvents := <-processor.EventsChan():
 			frame.Events = append(frame.Events, detectedEvents...)
+			if enableDebugLogging && len(detectedEvents) > 0 {
+				logger.Debug("Detected events", zap.Int("count", len(detectedEvents)))
+			}
 		default:
 			// No events detected
 		}
