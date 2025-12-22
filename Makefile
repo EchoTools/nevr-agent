@@ -11,16 +11,26 @@ OUT_DIR := bin
 # Docker
 IMAGE := ghcr.io/echotools/nevr-agent:$(VERSION)
 
-.PHONY: all build run clean test lint image image-push help
+.PHONY: all build build-windows build-linux build-all run clean test lint image image-push help
 
 .DEFAULT_GOAL := build
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-build: ## Build the agent
+build: ## Build for current OS
 	@mkdir -p $(OUT_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT_DIR)/$(BINARY) $(PKG)
+
+build-windows: ## Build for Windows (amd64)
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT_DIR)/$(BINARY).exe $(PKG)
+
+build-linux: ## Build for Linux (amd64)
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT_DIR)/$(BINARY)-linux $(PKG)
+
+build-all: build build-windows build-linux ## Build for all platforms
 
 run: build ## Build and run
 	./$(OUT_DIR)/$(BINARY)
