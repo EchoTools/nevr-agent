@@ -99,7 +99,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 
 	// Agent-specific flags
 	cmd.Flags().IntVarP(&frequency, "frequency", "f", 10, "Polling frequency in Hz")
-	cmd.Flags().StringVar(&format, "format", "replay", "Output format (replay, none, or comma-separated)")
+	cmd.Flags().StringVar(&format, "format", "nevrcap", "Output format (nevrcap, echoreplay, none, or comma-separated)")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "output", "Output directory for recorded files")
 
 	// Events API options
@@ -292,14 +292,20 @@ OuterLoop:
 					}
 
 					switch format {
-					case "replay":
-						fallthrough
-					default:
+					case "echoreplay", "replay":
 						filename = agent.EchoReplaySessionFilename(time.Now(), meta.SessionUUID)
 						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
 						replayWriter := agent.NewFrameDataLogSession(ctx, logger, outputPath, meta.SessionUUID)
 						go replayWriter.ProcessFrames()
 						writers = append(writers, replayWriter)
+					case "nevrcap":
+						fallthrough
+					default:
+						filename = agent.NevrCapSessionFilename(time.Now(), meta.SessionUUID)
+						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
+						nevrcapWriter := agent.NewNevrCapLogSession(ctx, logger, outputPath, meta.SessionUUID)
+						go nevrcapWriter.ProcessFrames()
+						writers = append(writers, nevrcapWriter)
 					}
 				}
 
