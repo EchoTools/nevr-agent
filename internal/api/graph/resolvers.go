@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	sessionEventDatabaseName   = "nakama"
+	sessionEventDatabaseName   = "nevr_telemetry"
 	sessionEventCollectionName = "session_events"
 )
 
