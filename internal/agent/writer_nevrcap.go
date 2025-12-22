@@ -119,7 +119,7 @@ OuterLoop:
 
 	n.Close()
 
-	n.logger.Info("NevrCap file written",
+	n.logger.Info("nevrcap file written",
 		zap.String("file_path", n.filePath),
 		zap.Int("frame_count", frameCount),
 	)
