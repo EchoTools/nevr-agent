@@ -169,7 +169,7 @@ client.seek('550e8400-e29b-41d4-a716-446655440000', 1000);
 ### List Matches
 
 ```bash
-GET /api/matches?status=completed&limit=10
+GET /api/v3/matches?status=completed&limit=10
 ```
 
 Response:
@@ -178,12 +178,30 @@ Response:
   "matches": [
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
-      "session_id": "session-123",
-      "start_time": "2024-01-15T10:00:00Z",
-      "end_time": "2024-01-15T10:15:00Z",
-      "frame_count": 9000,
+      "file_path": "/path/to/captures/2024-01-15_10-00-00_550e8400-e29b-41d4-a716-446655440000.nevrcap",
       "file_size": 1234567,
+      "created_at": "2024-01-15T10:15:00Z",
       "status": "completed"
+    }
+  ]
+}
+```
+
+### List Active Streams
+
+```bash
+GET /api/v3/stream
+```
+
+Response:
+```json
+{
+  "streams": [
+    {
+      "match_id": "550e8400-e29b-41d4-a716-446655440000",
+      "subscribers": 3,
+      "frames": 1500,
+      "start_time": 1705312800
     }
   ]
 }
@@ -192,8 +210,8 @@ Response:
 ### Download Match
 
 ```bash
-GET /api/matches/{id}/download?format=nevrcap
-GET /api/matches/{id}/download?format=echoreplay
+GET /api/v3/matches/{id}/download?format=nevrcap
+GET /api/v3/matches/{id}/download?format=echoreplay
 ```
 
 - `format=nevrcap` (default): Returns the native .nevrcap file

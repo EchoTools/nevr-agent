@@ -36,6 +36,8 @@ type Server struct {
 	jwtSecret       string
 	frameCount      atomic.Int64
 	streamHub       *StreamHub
+	storageManager  *StorageManager
+	matchRetrieval  *MatchRetrievalHandler
 }
 
 // Logger interface for abstracting logging
@@ -72,8 +74,16 @@ func (s *Server) SetAMQPPublisher(publisher *amqp.Publisher) {
 
 // NewServer creates a new session events HTTP server
 func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Server {
+	return NewServerWithStorage(mongoClient, logger, jwtSecret, nil, 60)
+}
+
+// NewServerWithStorage creates a new session events HTTP server with storage support
+func NewServerWithStorage(mongoClient *mongo.Client, logger Logger, jwtSecret string, storage *StorageManager, maxFrameRate int) *Server {
 	if logger == nil {
 		logger = &DefaultLogger{}
+	}
+	if maxFrameRate <= 0 {
+		maxFrameRate = 60
 	}
 
 	router := mux.NewRouter()
@@ -86,7 +96,13 @@ func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Serv
 		graphqlResolver: graph.NewResolver(mongoClient),
 		corsHandler:     createCORSHandler(),
 		jwtSecret:       jwtSecret,
-		streamHub:       NewStreamHub(nil, logger, nil, 60, nil),
+		storageManager:  storage,
+		streamHub:       NewStreamHub(storage, logger, nil, maxFrameRate, nil),
+	}
+
+	// Create match retrieval handler if storage is available
+	if storage != nil {
+		s.matchRetrieval = NewMatchRetrievalHandler(storage, logger, "")
 	}
 
 	s.setupRoutes()
@@ -159,6 +175,11 @@ func (s *Server) setupRoutes() {
 
 	// Register StreamHub routes for match streaming
 	s.streamHub.RegisterRoutes(s.router)
+
+	// Register match retrieval routes if storage is available
+	if s.matchRetrieval != nil {
+		s.matchRetrieval.RegisterRoutes(s.router)
+	}
 
 	// Add a NotFoundHandler for debugging unmatched routes
 	s.router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

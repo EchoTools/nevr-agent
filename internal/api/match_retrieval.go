@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -48,7 +50,57 @@ func NewMatchRetrievalHandler(storage *StorageManager, logger Logger, cacheDir s
 
 // RegisterRoutes registers the match retrieval routes
 func (h *MatchRetrievalHandler) RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/api/v3/matches", h.handleListMatches).Methods("GET")
+	r.HandleFunc("/api/v3/matches/{matchId}", h.handleGetMatch).Methods("GET")
 	r.HandleFunc("/api/v3/matches/{matchId}/download", h.handleDownload).Methods("GET")
+}
+
+// handleListMatches returns a list of available matches
+func (h *MatchRetrievalHandler) handleListMatches(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	limitStr := r.URL.Query().Get("limit")
+
+	limit := 100 // Default limit
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	matches, err := h.storage.ListMatches(status, limit)
+	if err != nil {
+		h.logger.Error("failed to list matches", "error", err)
+		http.Error(w, "failed to list matches", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches": matches,
+	})
+}
+
+// handleGetMatch returns details about a specific match
+func (h *MatchRetrievalHandler) handleGetMatch(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	matchID := vars["matchId"]
+
+	// Check if match is active
+	matches, err := h.storage.ListMatches("", 0)
+	if err != nil {
+		http.Error(w, "failed to get match", http.StatusInternalServerError)
+		return
+	}
+
+	for _, m := range matches {
+		if m.ID == matchID {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(m)
+			return
+		}
+	}
+
+	http.Error(w, "match not found", http.StatusNotFound)
 }
 
 // handleDownload handles match file download requests

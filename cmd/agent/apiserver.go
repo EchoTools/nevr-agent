@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/echotools/nevr-agent/v4/internal/api"
+	"github.com/echotools/nevr-agent/v4/internal/config"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -39,7 +40,7 @@ var (
 	jwtSecret        string
 	captureDir       string
 	captureRetention string
-	captureMaxSize   int64
+	captureMaxSize   string
 	maxStreamHz      int
 	metricsAddr      string
 )
@@ -75,8 +76,8 @@ and real-time streaming support.`,
 
 	// Capture storage flags
 	cmd.Flags().StringVar(&captureDir, "capture-dir", "", "Directory to store nevrcap capture files")
-	cmd.Flags().StringVar(&captureRetention, "capture-retention", "", "How long to keep capture files (e.g., 24h, 7d)")
-	cmd.Flags().Int64Var(&captureMaxSize, "capture-max-size", 0, "Maximum storage for captures in bytes")
+	cmd.Flags().StringVar(&captureRetention, "capture-retention", "168h", "How long to keep capture files (e.g., 24h, 7d)")
+	cmd.Flags().StringVar(&captureMaxSize, "capture-max-size", "10G", "Maximum storage for captures (e.g., 500M, 10G, 1T)")
 
 	// Rate limiting
 	cmd.Flags().IntVar(&maxStreamHz, "max-stream-hz", 0, "Maximum frames per second to accept from clients")
@@ -105,7 +106,11 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 		cfg.APIServer.CaptureRetention = captureRetention
 	}
 	if cmd.Flags().Changed("capture-max-size") {
-		cfg.APIServer.CaptureMaxSize = captureMaxSize
+		parsedSize, err := config.ParseByteSize(captureMaxSize)
+		if err != nil {
+			return fmt.Errorf("invalid capture-max-size: %w", err)
+		}
+		cfg.APIServer.CaptureMaxSize = parsedSize
 	}
 	if cmd.Flags().Changed("max-stream-hz") {
 		cfg.APIServer.MaxStreamHz = maxStreamHz
