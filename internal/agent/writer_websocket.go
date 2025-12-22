@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,12 @@ const (
 	initialReconnectDelay = 1 * time.Second
 	maxReconnectDelay     = 30 * time.Second
 	reconnectBackoffMult  = 2.0
+
+	// Buffer settings
+	memoryBufferSize     = 1000                  // Max frames to keep in memory
+	diskBufferThreshold  = 3 * time.Second       // Start disk buffering after this duration
+	catchUpBatchSize     = 100                   // Frames to send per batch when catching up
+	catchUpBatchInterval = 10 * time.Millisecond // Delay between catch-up batches
 )
 
 // WebSocketWriter implements FrameWriter and streams frames to the API server over WebSocket.
@@ -37,7 +45,15 @@ type WebSocketWriter struct {
 	connected  bool
 
 	// Reconnection state
-	reconnectCh chan struct{}
+	reconnectCh    chan struct{}
+	disconnectedAt time.Time
+
+	// Disk buffer state
+	diskBufferMu    sync.Mutex
+	diskBufferFile  *os.File
+	diskBufferPath  string
+	usingDiskBuffer bool
+	diskFrameCount  int64
 }
 
 // NewWebSocketWriter creates a new WebSocketWriter.
@@ -50,7 +66,7 @@ func NewWebSocketWriter(logger *zap.Logger, socketURL, jwtToken string) *WebSock
 		jwtToken:    jwtToken,
 		ctx:         ctx,
 		cancel:      cancel,
-		outgoingCh:  make(chan *telemetry.LobbySessionStateFrame, 1000),
+		outgoingCh:  make(chan *telemetry.LobbySessionStateFrame, memoryBufferSize),
 		stopped:     false,
 		reconnectCh: make(chan struct{}, 1),
 	}
@@ -168,6 +184,9 @@ func (w *WebSocketWriter) reconnectLoop() {
 				// Successfully reconnected
 				w.logger.Info("Successfully reconnected to WebSocket")
 				delay = initialReconnectDelay // Reset backoff
+
+				// Drain any buffered frames from disk
+				go w.drainDiskBuffer()
 				break
 			}
 		}
@@ -211,6 +230,9 @@ func (w *WebSocketWriter) Close() {
 	if w.conn != nil {
 		w.conn.Close()
 	}
+
+	// Clean up disk buffer
+	go w.cleanupDiskBuffer()
 }
 
 // IsStopped returns whether the writer is stopped.
@@ -274,6 +296,7 @@ func (w *WebSocketWriter) writeLoop() {
 	ticker := time.NewTicker(50 * time.Second) // Keep-alive ping
 	defer func() {
 		ticker.Stop()
+		w.cleanupDiskBuffer()
 		w.logger.Debug("Write loop stopped")
 	}()
 
@@ -302,6 +325,7 @@ func (w *WebSocketWriter) writeLoop() {
 				w.logger.Warn("Failed to send ping, triggering reconnect", zap.Error(err))
 				w.mu.Lock()
 				w.connected = false
+				w.disconnectedAt = time.Now()
 				w.mu.Unlock()
 				w.triggerReconnect()
 				return
@@ -311,14 +335,22 @@ func (w *WebSocketWriter) writeLoop() {
 			w.mu.Lock()
 			conn := w.conn
 			connected := w.connected
+			disconnectedAt := w.disconnectedAt
 			w.mu.Unlock()
 
 			if !connected || conn == nil {
-				// Buffer the frame back if possible, otherwise drop it
-				select {
-				case w.outgoingCh <- frame:
-				default:
-					w.logger.Warn("Dropping frame while disconnected, buffer full")
+				// Check if we should switch to disk buffering
+				if !disconnectedAt.IsZero() && time.Since(disconnectedAt) > diskBufferThreshold {
+					if err := w.bufferToDisk(frame, &marshaler); err != nil {
+						w.logger.Warn("Failed to buffer frame to disk", zap.Error(err))
+					}
+				} else {
+					// Still in memory buffer phase, re-queue the frame
+					select {
+					case w.outgoingCh <- frame:
+					default:
+						w.logger.Warn("Dropping frame while disconnected, buffer full")
+					}
 				}
 				time.Sleep(100 * time.Millisecond)
 				continue
@@ -351,10 +383,161 @@ func (w *WebSocketWriter) writeLoop() {
 				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
 				w.mu.Lock()
 				w.connected = false
+				w.disconnectedAt = time.Now()
 				w.mu.Unlock()
 				w.triggerReconnect()
 				return
 			}
 		}
 	}
+}
+
+// bufferToDisk writes a frame to the disk buffer file
+func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, marshaler *protojson.MarshalOptions) error {
+	w.diskBufferMu.Lock()
+	defer w.diskBufferMu.Unlock()
+
+	// Create disk buffer file if not exists
+	if w.diskBufferFile == nil {
+		f, err := os.CreateTemp("", "nevr-frame-buffer-*.jsonl")
+		if err != nil {
+			return fmt.Errorf("failed to create disk buffer file: %w", err)
+		}
+		w.diskBufferFile = f
+		w.diskBufferPath = f.Name()
+		w.usingDiskBuffer = true
+		w.diskFrameCount = 0
+		w.logger.Info("Started disk buffering", zap.String("path", w.diskBufferPath))
+	}
+
+	// Wrap frame in Envelope and marshal
+	envelope := &telemetry.Envelope{
+		Message: &telemetry.Envelope_Frame{
+			Frame: frame,
+		},
+	}
+
+	data, err := marshaler.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to marshal envelope: %w", err)
+	}
+
+	// Write as a line (JSONL format)
+	if _, err := w.diskBufferFile.Write(data); err != nil {
+		return fmt.Errorf("failed to write to disk buffer: %w", err)
+	}
+	if _, err := w.diskBufferFile.WriteString("\n"); err != nil {
+		return fmt.Errorf("failed to write newline to disk buffer: %w", err)
+	}
+
+	w.diskFrameCount++
+	if w.diskFrameCount%100 == 0 {
+		w.logger.Debug("Disk buffer progress", zap.Int64("frames_buffered", w.diskFrameCount))
+	}
+
+	return nil
+}
+
+// drainDiskBuffer reads and sends all buffered frames after reconnection
+func (w *WebSocketWriter) drainDiskBuffer() {
+	w.diskBufferMu.Lock()
+	if !w.usingDiskBuffer || w.diskBufferFile == nil {
+		w.diskBufferMu.Unlock()
+		return
+	}
+
+	// Close the write handle and reopen for reading
+	w.diskBufferFile.Close()
+	path := w.diskBufferPath
+	frameCount := w.diskFrameCount
+	w.diskBufferMu.Unlock()
+
+	w.logger.Info("Draining disk buffer", zap.String("path", path), zap.Int64("frames", frameCount))
+
+	f, err := os.Open(path)
+	if err != nil {
+		w.logger.Error("Failed to open disk buffer for reading", zap.Error(err))
+		w.cleanupDiskBuffer()
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	// Increase buffer size for potentially large JSON lines
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+
+	sentCount := int64(0)
+	batchCount := 0
+
+	for scanner.Scan() {
+		select {
+		case <-w.ctx.Done():
+			w.logger.Warn("Context cancelled during disk buffer drain")
+			w.cleanupDiskBuffer()
+			return
+		default:
+		}
+
+		w.mu.Lock()
+		conn := w.conn
+		connected := w.connected
+		w.mu.Unlock()
+
+		if !connected || conn == nil {
+			w.logger.Warn("Connection lost during disk buffer drain, aborting")
+			// Don't clean up - keep the buffer for next reconnect
+			return
+		}
+
+		data := scanner.Bytes()
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			w.logger.Warn("Failed to send buffered frame, will retry on next reconnect", zap.Error(err))
+			w.mu.Lock()
+			w.connected = false
+			w.disconnectedAt = time.Now()
+			w.mu.Unlock()
+			w.triggerReconnect()
+			return
+		}
+
+		sentCount++
+		batchCount++
+
+		// Throttle to avoid overwhelming the server
+		if batchCount >= catchUpBatchSize {
+			batchCount = 0
+			time.Sleep(catchUpBatchInterval)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		w.logger.Error("Error reading disk buffer", zap.Error(err))
+	}
+
+	w.logger.Info("Disk buffer drained successfully", zap.Int64("frames_sent", sentCount))
+	w.cleanupDiskBuffer()
+}
+
+// cleanupDiskBuffer removes the disk buffer file and resets state
+func (w *WebSocketWriter) cleanupDiskBuffer() {
+	w.diskBufferMu.Lock()
+	defer w.diskBufferMu.Unlock()
+
+	if w.diskBufferFile != nil {
+		w.diskBufferFile.Close()
+		w.diskBufferFile = nil
+	}
+
+	if w.diskBufferPath != "" {
+		if err := os.Remove(w.diskBufferPath); err != nil && !os.IsNotExist(err) {
+			w.logger.Warn("Failed to remove disk buffer file", zap.Error(err), zap.String("path", w.diskBufferPath))
+		} else if err == nil {
+			w.logger.Debug("Cleaned up disk buffer file", zap.String("path", w.diskBufferPath))
+		}
+		w.diskBufferPath = ""
+	}
+
+	w.usingDiskBuffer = false
+	w.diskFrameCount = 0
 }
