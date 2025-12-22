@@ -87,31 +87,3 @@ type HealthStatus {
   timestamp: Time!
   database: String!
 }
-
-"""
-Input type for storing a new session event
-"""
-input StoreSessionEventInput {
-  lobbySessionId: ID!
-  userId: String
-  frameData: JSON!
-}
-
-"""
-Response type for storing a session event
-"""
-type StoreSessionEventPayload {
-  success: Boolean!
-  event: SessionEvent
-  error: String
-}
-
-"""
-Mutation root for the EVR Data Recorder API
-"""
-type Mutation {
-  """
-  Store a new session event
-  """
-  storeSessionEvent(input: StoreSessionEventInput!): StoreSessionEventPayload!
-}

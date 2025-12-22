@@ -93,10 +93,6 @@ serving recorded data.`,
 	showCmd.GroupID = "main"
 	rootCmd.AddCommand(showCmd)
 
-	pushCmd := newSendEventsCommand()
-	pushCmd.GroupID = "main"
-	rootCmd.AddCommand(pushCmd)
-
 	rootCmd.AddCommand(newVersionCheckCommand())
 
 	if err := rootCmd.Execute(); err != nil {

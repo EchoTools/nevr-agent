@@ -183,6 +183,9 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 			continue
 		}
 
+		// Reset timeout timer - we received valid data from the API
+		timeoutTimer.Reset(5 * time.Second)
+
 		frame, err := processor.ProcessAndDetectEvents(sessionBuffer.Bytes(), playerBonesBuffer.Bytes(), time.Now().Add(time.Millisecond))
 		if err != nil {
 			logger.Debug("Failed to process frame", zap.Error(err))
@@ -255,6 +258,5 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 				zap.Error(err))
 			continue
 		}
-		timeoutTimer.Reset(5 * time.Second) // Reset the timer for the next iteration
 	}
 }

@@ -169,9 +169,8 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 	logger.Info("Starting session events service",
 		zap.String("address", cfg.APIServer.ServerAddress))
 	logger.Info("Available endpoints:",
-		zap.String("POST", "/lobby-session-events - Store session event"),
+		zap.String("WebSocket", "/v3/stream - WebSocket stream with JWT auth (receive events)"),
 		zap.String("GET", "/lobby-session-events/{match_id} - Get session events by match ID"),
-		zap.String("WebSocket", "/v3/stream - WebSocket stream with JWT auth"),
 		zap.String("GET", "/health - Health check"))
 
 	if err := service.Start(ctx); err != nil {
