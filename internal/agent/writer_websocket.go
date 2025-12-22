@@ -16,6 +16,13 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
+const (
+	// Reconnection settings
+	initialReconnectDelay = 1 * time.Second
+	maxReconnectDelay     = 30 * time.Second
+	reconnectBackoffMult  = 2.0
+)
+
 // WebSocketWriter implements FrameWriter and streams frames to the API server over WebSocket.
 type WebSocketWriter struct {
 	logger     *zap.Logger
@@ -28,6 +35,9 @@ type WebSocketWriter struct {
 	outgoingCh chan *telemetry.LobbySessionStateFrame
 	stopped    bool
 	connected  bool
+
+	// Reconnection state
+	reconnectCh chan struct{}
 }
 
 // NewWebSocketWriter creates a new WebSocketWriter.
@@ -35,13 +45,14 @@ func NewWebSocketWriter(logger *zap.Logger, socketURL, jwtToken string) *WebSock
 	ctx, cancel := context.WithCancel(context.Background())
 
 	w := &WebSocketWriter{
-		logger:     logger.With(zap.String("component", "websocket_writer")),
-		socketURL:  socketURL,
-		jwtToken:   jwtToken,
-		ctx:        ctx,
-		cancel:     cancel,
-		outgoingCh: make(chan *telemetry.LobbySessionStateFrame, 1000),
-		stopped:    false,
+		logger:      logger.With(zap.String("component", "websocket_writer")),
+		socketURL:   socketURL,
+		jwtToken:    jwtToken,
+		ctx:         ctx,
+		cancel:      cancel,
+		outgoingCh:  make(chan *telemetry.LobbySessionStateFrame, 1000),
+		stopped:     false,
+		reconnectCh: make(chan struct{}, 1),
 	}
 
 	return w
@@ -52,6 +63,11 @@ func (w *WebSocketWriter) Connect() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	return w.connectLocked()
+}
+
+// connectLocked establishes the WebSocket connection (must be called with lock held)
+func (w *WebSocketWriter) connectLocked() error {
 	if w.connected {
 		return nil
 	}
@@ -89,8 +105,73 @@ func (w *WebSocketWriter) Connect() error {
 	// Start background routines
 	go w.readLoop()
 	go w.writeLoop()
+	go w.reconnectLoop()
 
 	return nil
+}
+
+// triggerReconnect signals that a reconnection is needed
+func (w *WebSocketWriter) triggerReconnect() {
+	select {
+	case w.reconnectCh <- struct{}{}:
+	default:
+		// Reconnect already pending
+	}
+}
+
+// reconnectLoop handles automatic reconnection with exponential backoff
+func (w *WebSocketWriter) reconnectLoop() {
+	delay := initialReconnectDelay
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-w.reconnectCh:
+			// Connection lost, attempt to reconnect
+			for {
+				select {
+				case <-w.ctx.Done():
+					return
+				default:
+				}
+
+				w.logger.Info("Attempting to reconnect", zap.Duration("delay", delay))
+				time.Sleep(delay)
+
+				w.mu.Lock()
+				if w.stopped {
+					w.mu.Unlock()
+					return
+				}
+
+				// Close existing connection if any
+				if w.conn != nil {
+					w.conn.Close()
+					w.conn = nil
+				}
+				w.connected = false
+
+				err := w.connectLocked()
+				w.mu.Unlock()
+
+				if err != nil {
+					w.logger.Warn("Reconnection failed", zap.Error(err), zap.Duration("next_retry", delay))
+					// Exponential backoff
+					delay = time.Duration(float64(delay) * reconnectBackoffMult)
+					if delay > maxReconnectDelay {
+						delay = maxReconnectDelay
+					}
+					continue
+				}
+
+				// Successfully reconnected
+				w.logger.Info("Successfully reconnected to WebSocket")
+				delay = initialReconnectDelay // Reset backoff
+				break
+			}
+		}
+	}
 }
 
 // Context returns the writer context.
@@ -141,8 +222,7 @@ func (w *WebSocketWriter) IsStopped() bool {
 
 func (w *WebSocketWriter) readLoop() {
 	defer func() {
-		w.logger.Info("Read loop stopped")
-		w.Close()
+		w.logger.Debug("Read loop stopped")
 	}()
 
 	for {
@@ -152,11 +232,29 @@ func (w *WebSocketWriter) readLoop() {
 		default:
 		}
 
-		_, message, err := w.conn.ReadMessage()
+		w.mu.Lock()
+		conn := w.conn
+		w.mu.Unlock()
+
+		if conn == nil {
+			// No connection, wait a bit and check again
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) && !strings.Contains(err.Error(), "use of closed network connection") {
-				w.logger.Error("WebSocket read error", zap.Error(err))
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				w.logger.Info("WebSocket closed normally")
+			} else if !strings.Contains(err.Error(), "use of closed network connection") {
+				w.logger.Warn("WebSocket read error, triggering reconnect", zap.Error(err))
 			}
+
+			w.mu.Lock()
+			w.connected = false
+			w.mu.Unlock()
+
+			w.triggerReconnect()
 			return
 		}
 
@@ -176,7 +274,7 @@ func (w *WebSocketWriter) writeLoop() {
 	ticker := time.NewTicker(50 * time.Second) // Keep-alive ping
 	defer func() {
 		ticker.Stop()
-		w.logger.Info("Write loop stopped")
+		w.logger.Debug("Write loop stopped")
 	}()
 
 	marshaler := protojson.MarshalOptions{
@@ -192,14 +290,40 @@ func (w *WebSocketWriter) writeLoop() {
 
 		case <-ticker.C:
 			w.mu.Lock()
-			if err := w.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				w.logger.Error("Failed to send ping", zap.Error(err))
-				w.mu.Unlock()
-				return
-			}
+			conn := w.conn
+			connected := w.connected
 			w.mu.Unlock()
 
+			if !connected || conn == nil {
+				continue
+			}
+
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				w.logger.Warn("Failed to send ping, triggering reconnect", zap.Error(err))
+				w.mu.Lock()
+				w.connected = false
+				w.mu.Unlock()
+				w.triggerReconnect()
+				return
+			}
+
 		case frame := <-w.outgoingCh:
+			w.mu.Lock()
+			conn := w.conn
+			connected := w.connected
+			w.mu.Unlock()
+
+			if !connected || conn == nil {
+				// Buffer the frame back if possible, otherwise drop it
+				select {
+				case w.outgoingCh <- frame:
+				default:
+					w.logger.Warn("Dropping frame while disconnected, buffer full")
+				}
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
 			// Log event count for debugging
 			if len(frame.Events) > 0 {
 				w.logger.Debug("Sending frame with events",
@@ -220,13 +344,15 @@ func (w *WebSocketWriter) writeLoop() {
 				continue
 			}
 
-			w.mu.Lock()
-			w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			err = w.conn.WriteMessage(websocket.TextMessage, data)
-			w.mu.Unlock()
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			err = conn.WriteMessage(websocket.TextMessage, data)
 
 			if err != nil {
-				w.logger.Error("Failed to write message", zap.Error(err))
+				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
+				w.mu.Lock()
+				w.connected = false
+				w.mu.Unlock()
+				w.triggerReconnect()
 				return
 			}
 		}
