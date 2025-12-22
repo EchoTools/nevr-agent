@@ -43,6 +43,7 @@ var (
 	captureMaxSize   string
 	maxStreamHz      int
 	metricsAddr      string
+	nodeID           string
 )
 
 func newAPIServerCommand() *cobra.Command {
@@ -85,6 +86,9 @@ and real-time streaming support.`,
 	// Metrics
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Prometheus metrics endpoint address (e.g., :9090)")
 
+	// Node identifier
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Unique identifier for this agent node (defaults to hostname)")
+
 	return cmd
 }
 
@@ -118,6 +122,9 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("metrics-addr") {
 		cfg.APIServer.MetricsAddr = metricsAddr
 	}
+	if cmd.Flags().Changed("node-id") {
+		cfg.APIServer.NodeID = nodeID
+	}
 
 	// Validate configuration
 	if err := cfg.ValidateAPIServerConfig(); err != nil {
@@ -131,7 +138,8 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 		zap.String("capture_retention", cfg.APIServer.CaptureRetention),
 		zap.Int64("capture_max_size", cfg.APIServer.CaptureMaxSize),
 		zap.Int("max_stream_hz", cfg.APIServer.MaxStreamHz),
-		zap.String("metrics_addr", cfg.APIServer.MetricsAddr))
+		zap.String("metrics_addr", cfg.APIServer.MetricsAddr),
+		zap.String("node_id", cfg.APIServer.NodeID))
 
 	// Create service configuration
 	serviceConfig := api.DefaultConfig()
@@ -143,6 +151,7 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 	serviceConfig.CaptureMaxSize = cfg.APIServer.CaptureMaxSize
 	serviceConfig.MaxStreamHz = cfg.APIServer.MaxStreamHz
 	serviceConfig.MetricsAddr = cfg.APIServer.MetricsAddr
+	serviceConfig.NodeID = cfg.APIServer.NodeID
 
 	// Create service
 	service, err := api.NewService(serviceConfig, &zapLoggerAdapter{logger: logger})
