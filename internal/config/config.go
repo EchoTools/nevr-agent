@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -325,4 +326,61 @@ func (c *Config) ValidateReplayerConfig() error {
 		}
 	}
 	return nil
+}
+
+// ParseByteSize parses a size string with optional unit suffix (K, M, G, T) into bytes.
+// Examples: "1000", "1000K", "500M", "10G", "1T"
+// Units are case-insensitive and use powers of 1024 (KiB, MiB, GiB, TiB).
+// Returns an error if the format is invalid.
+func ParseByteSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	// Match number with optional decimal and unit suffix
+	re := regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([kKmMgGtT])?[iI]?[bB]?$`)
+	matches := re.FindStringSubmatch(s)
+	if matches == nil {
+		return 0, fmt.Errorf("invalid size format: %q (use format like 1000, 500K, 100M, 10G)", s)
+	}
+
+	value, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number in size: %q", s)
+	}
+
+	var multiplier int64 = 1
+	if len(matches) > 2 && matches[2] != "" {
+		switch strings.ToUpper(matches[2]) {
+		case "K":
+			multiplier = 1024
+		case "M":
+			multiplier = 1024 * 1024
+		case "G":
+			multiplier = 1024 * 1024 * 1024
+		case "T":
+			multiplier = 1024 * 1024 * 1024 * 1024
+		}
+	}
+
+	return int64(value * float64(multiplier)), nil
+}
+
+// FormatByteSize formats a byte size into a human-readable string with units.
+func FormatByteSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(bytes)/float64(div), "KMGT"[exp])
 }

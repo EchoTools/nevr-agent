@@ -110,11 +110,12 @@ func (c *Config) Validate() error {
 
 // Service represents the complete session events service
 type Service struct {
-	config        *Config
-	mongoClient   *mongo.Client
-	server        *Server
-	amqpPublisher *amqp.Publisher
-	logger        Logger
+	config         *Config
+	mongoClient    *mongo.Client
+	server         *Server
+	amqpPublisher  *amqp.Publisher
+	storageManager *StorageManager
+	logger         Logger
 }
 
 // NewService creates a new session events service
@@ -169,8 +170,23 @@ func (s *Service) Initialize(ctx context.Context) error {
 		s.logger.Info("AMQP publisher initialized", "queue", s.config.AMQPQueueName)
 	}
 
-	// Create HTTP server
-	s.server = NewServer(s.mongoClient, s.logger, s.config.JWTSecret)
+	// Initialize storage manager if capture directory is configured
+	if s.config.CaptureDir != "" {
+		retention, err := time.ParseDuration(s.config.CaptureRetention)
+		if err != nil {
+			retention = 168 * time.Hour // Default 7 days
+		}
+
+		sm, err := NewStorageManager(s.config.CaptureDir, retention, s.config.CaptureMaxSize, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create storage manager: %w", err)
+		}
+		s.storageManager = sm
+		s.logger.Info("Storage manager initialized", "capture_dir", s.config.CaptureDir)
+	}
+
+	// Create HTTP server with storage manager
+	s.server = NewServerWithStorage(s.mongoClient, s.logger, s.config.JWTSecret, s.storageManager, s.config.MaxStreamHz)
 
 	// Set the AMQP publisher on the server if available
 	if s.amqpPublisher != nil {
