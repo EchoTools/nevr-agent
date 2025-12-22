@@ -91,8 +91,39 @@ func NewStreamHub(storage *StorageManager, logger Logger, metrics *Metrics, maxF
 
 // RegisterRoutes registers the stream API routes
 func (h *StreamHub) RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/api/v3/stream", h.handleListStreams).Methods("GET")
 	r.HandleFunc("/api/v3/stream/{matchId}", h.handleStreamConnection).Methods("GET")
 	r.HandleFunc("/api/v3/stream/{matchId}/info", h.handleStreamInfo).Methods("GET")
+}
+
+// handleListStreams returns a list of all active match streams
+func (h *StreamHub) handleListStreams(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	type streamInfo struct {
+		MatchID     string `json:"match_id"`
+		Subscribers int    `json:"subscribers"`
+		Frames      int    `json:"frames"`
+		StartTime   int64  `json:"start_time"`
+	}
+
+	streams := make([]streamInfo, 0, len(h.matches))
+	for matchID, stream := range h.matches {
+		stream.mu.RLock()
+		streams = append(streams, streamInfo{
+			MatchID:     matchID,
+			Subscribers: len(stream.subscribers),
+			Frames:      len(stream.frames),
+			StartTime:   stream.startTime.Unix(),
+		})
+		stream.mu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"streams": streams,
+	})
 }
 
 // handleStreamConnection handles WebSocket connections for streaming

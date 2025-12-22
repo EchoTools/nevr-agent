@@ -35,6 +35,7 @@ type Server struct {
 	amqpPublisher   *amqp.Publisher
 	jwtSecret       string
 	frameCount      atomic.Int64
+	streamHub       *StreamHub
 }
 
 // Logger interface for abstracting logging
@@ -85,6 +86,7 @@ func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Serv
 		graphqlResolver: graph.NewResolver(mongoClient),
 		corsHandler:     createCORSHandler(),
 		jwtSecret:       jwtSecret,
+		streamHub:       NewStreamHub(nil, logger, nil, 60, nil),
 	}
 
 	s.setupRoutes()
@@ -154,6 +156,9 @@ func (s *Server) setupRoutes() {
 
 	// Shorter WebSocket endpoint alias
 	s.router.HandleFunc("/ws", JWTMiddleware(s.jwtSecret, s.WebSocketStreamHandler)).Methods("GET")
+
+	// Register StreamHub routes for match streaming
+	s.streamHub.RegisterRoutes(s.router)
 
 	// Add a NotFoundHandler for debugging unmatched routes
 	s.router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
