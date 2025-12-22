@@ -52,7 +52,7 @@ services:
     ports:
       - "${API_PORT:-8080}:8080"
     environment:
-      EVR_APISERVER_MONGO_URI: mongodb://${MONGODB_USER:-admin}:${MONGODB_PASSWORD:-mongodb_password}@mongodb:27017/${MONGODB_DATABASE:-nakama}?authSource=admin
+      EVR_APISERVER_MONGO_URI: mongodb://${MONGODB_USER:-admin}:${MONGODB_PASSWORD:-mongodb_password}@mongodb:27017/${MONGODB_DATABASE:-telemetry}?authSource=admin
       EVR_APISERVER_SERVER_ADDRESS: :8080
       EVR_APISERVER_AMQP_URI: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-rabbitmq_password}@rabbitmq:5672/
       EVR_APISERVER_AMQP_ENABLED: ${AMQP_ENABLED:-true}

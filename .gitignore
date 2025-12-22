@@ -38,3 +38,7 @@ agent.log
 /validator
 output/
 recordings/
+
+# local configuration
+/local.yml
+/agent.local.yml
