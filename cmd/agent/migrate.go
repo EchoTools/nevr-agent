@@ -10,10 +10,11 @@ import (
 
 	"github.com/echotools/nevr-agent/v4/internal/api"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+var migrateMongoURI string
 
 func newMigrateCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -31,17 +32,19 @@ to ensure the database structure is up to date.`,
 		RunE: runMigrate,
 	}
 
-	cmd.Flags().String("mongo-uri", "mongodb://localhost:27017", "MongoDB connection URI")
-	viper.BindPFlag("migrate.mongo-uri", cmd.Flags().Lookup("mongo-uri"))
+	cmd.Flags().StringVar(&migrateMongoURI, "mongo-uri", "", "MongoDB connection URI")
 
 	return cmd
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
-	// Get MongoDB URI from flag or environment
-	mongoURI := viper.GetString("migrate.mongo-uri")
+	// Priority: CLI flag > config file > env var > default
+	mongoURI := cfg.APIServer.MongoURI
+	if cmd.Flags().Changed("mongo-uri") {
+		mongoURI = migrateMongoURI
+	}
 	if mongoURI == "" {
-		mongoURI = os.Getenv("EVR_APISERVER_MONGO_URI")
+		mongoURI = os.Getenv("NEVR_APISERVER_MONGO_URI")
 	}
 	if mongoURI == "" {
 		mongoURI = "mongodb://localhost:27017"

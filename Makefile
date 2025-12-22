@@ -1,61 +1,43 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
-LDFLAGS = -X main.version=$(VERSION) -s -w
+# ============================================================================
+# NEVR Agent Makefile
+# ============================================================================
 
-# Main consolidated binary
-BINARY := agent
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BINARY  := agent
+PKG     := ./cmd/agent
+LDFLAGS := -s -w -X main.version=$(VERSION)
+OUT_DIR := bin
 
-# OS detection
-GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
+# Docker
+IMAGE := ghcr.io/echotools/nevr-agent:$(VERSION)
 
-# Windows-specific variables
-WINDOWS_BINARY := $(BINARY).exe
+.PHONY: all build run clean test lint image image-push help
 
-.PHONY: all version build windows linux clean test bench lint install-hooks
+.DEFAULT_GOAL := build
 
-all: build
+help: ## Show this help
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-version:
-	@echo $(VERSION)
+build: ## Build the agent
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT_DIR)/$(BINARY) $(PKG)
 
-# Install git hooks
-install-hooks:
-	@echo "Installing git hooks..."
-	cp scripts/pre-commit .git/hooks/pre-commit
-	chmod +x .git/hooks/pre-commit
-	@echo "Git hooks installed."
+run: build ## Build and run
+	./$(OUT_DIR)/$(BINARY)
 
-# Run linting
-lint:
-	@echo "Running linters..."
+test: ## Run tests
+	go test ./...
+
+lint: ## Format and vet
 	go fmt ./...
 	go vet ./...
 
-# Run smoke tests only
-smoke-test:
-	@echo "Running smoke tests..."
-	go test -v -short -run "^TestCLI" ./cmd/agent/...
+image: ## Build Docker image
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) -t ghcr.io/echotools/nevr-agent:latest .
 
-# Build the main consolidated binary
-build:
-	@echo "Building $(BINARY) for $(GOOS)/$(GOARCH) (version=$(VERSION))"
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agent
+image-push: image ## Push Docker image
+	docker push $(IMAGE)
+	docker push ghcr.io/echotools/nevr-agent:latest
 
-# Build for Windows
-windows:
-	@echo "Building $(WINDOWS_BINARY) for windows/amd64 (version=$(VERSION))"
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(WINDOWS_BINARY) ./cmd/agent
-
-# Build for Linux
-linux:
-	@echo "Building $(BINARY) for linux/amd64 (version=$(VERSION))"
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agent
-
-bench:
-	go test -bench=. -benchmem ./...
-
-test:
-	go test ./...
-
-clean:
-	rm -f $(BINARY) $(WINDOWS_BINARY)
+clean: ## Clean build artifacts
+	rm -rf $(OUT_DIR) $(BINARY)

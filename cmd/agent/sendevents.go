@@ -14,8 +14,15 @@ import (
 	"github.com/echotools/nevr-capture/v3/pkg/processing"
 	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
+)
+
+var (
+	sendEventsURL string
+	sendToken     string
+	sendRate      float64
+	sendDryRun    bool
+	sendVerbose   bool
 )
 
 func newSendEventsCommand() *cobra.Command {
@@ -51,18 +58,11 @@ Supported file formats:
 	}
 
 	// Command-specific flags
-	cmd.Flags().String("events-url", "http://localhost:8081", "Events API endpoint URL")
-	cmd.Flags().String("token", "", "JWT token for API authentication")
-	cmd.Flags().Float64("rate", 0, "Playback rate in frames per second (0 = as fast as possible)")
-	cmd.Flags().Bool("dry-run", false, "Detect events without sending them to the API")
-	cmd.Flags().Bool("verbose", false, "Print detailed information about each event")
-
-	// Bind flags to viper so they can be overridden by config file and env vars
-	viper.BindPFlag("sendevents.events_url", cmd.Flags().Lookup("events-url"))
-	viper.BindPFlag("sendevents.token", cmd.Flags().Lookup("token"))
-	viper.BindPFlag("sendevents.rate", cmd.Flags().Lookup("rate"))
-	viper.BindPFlag("sendevents.dry_run", cmd.Flags().Lookup("dry-run"))
-	viper.BindPFlag("sendevents.verbose", cmd.Flags().Lookup("verbose"))
+	cmd.Flags().StringVar(&sendEventsURL, "events-url", "http://localhost:8081", "Events API endpoint URL")
+	cmd.Flags().StringVar(&sendToken, "token", "", "JWT token for API authentication")
+	cmd.Flags().Float64Var(&sendRate, "rate", 0, "Playback rate in frames per second (0 = as fast as possible)")
+	cmd.Flags().BoolVar(&sendDryRun, "dry-run", false, "Detect events without sending them to the API")
+	cmd.Flags().BoolVar(&sendVerbose, "verbose", false, "Print detailed information about each event")
 
 	return cmd
 }
@@ -70,13 +70,20 @@ Supported file formats:
 func runSendEvents(cmd *cobra.Command, args []string) error {
 	filename := args[0]
 
-	// Get values from viper (which merges config file, env vars, and flags)
-	// Flags take precedence when explicitly set
-	eventsURL := viper.GetString("sendevents.events_url")
-	token := viper.GetString("sendevents.token")
-	rate := viper.GetFloat64("sendevents.rate")
-	dryRun := viper.GetBool("sendevents.dry_run")
-	verbose := viper.GetBool("sendevents.verbose")
+	// Use flag values directly
+	eventsURL := sendEventsURL
+	token := sendToken
+	rate := sendRate
+	dryRun := sendDryRun
+	verbose := sendVerbose
+
+	// Fall back to config file values if not set on command line
+	if !cmd.Flags().Changed("token") && cfg.Agent.JWTToken != "" {
+		token = cfg.Agent.JWTToken
+	}
+	if !cmd.Flags().Changed("events-url") && cfg.Agent.EventsURL != "" {
+		eventsURL = cfg.Agent.EventsURL
+	}
 
 	// Validate file exists
 	if _, err := os.Stat(filename); os.IsNotExist(err) {

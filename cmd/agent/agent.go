@@ -79,7 +79,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
   agent stream --include-modes echo_arena --active-only 127.0.0.1:6721`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-				streamCfg := StreamConfig{
+			streamCfg := StreamConfig{
 				Frequency:     frequency,
 				Format:        format,
 				OutputDir:     outputDir,
@@ -125,12 +125,24 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 }
 
 func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
-	// Override config with command flags
+	// Override config with command flags (only if explicitly set)
 	cfg.Agent.Frequency = streamCfg.Frequency
 	cfg.Agent.Format = streamCfg.Format
 	cfg.Agent.OutputDirectory = streamCfg.OutputDir
 	cfg.Agent.EventsEnabled = streamCfg.Events
 	cfg.Agent.EventsURL = streamCfg.EventsURL
+
+	// Merge JWT token: CLI flag takes precedence over config file
+	if streamCfg.JWTToken != "" {
+		cfg.Agent.JWTToken = streamCfg.JWTToken
+	}
+
+	// Log JWT token status for debugging
+	if cfg.Agent.JWTToken != "" {
+		logger.Debug("JWT token configured", zap.Int("token_length", len(cfg.Agent.JWTToken)))
+	} else {
+		logger.Debug("No JWT token configured")
+	}
 
 	// If only streaming to events API, we don't need file output
 	if streamCfg.EventsStream || streamCfg.Events {
