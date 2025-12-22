@@ -296,9 +296,7 @@ func (c *Config) ValidateAPIServerConfig() error {
 	if c.APIServer.MongoURI == "" {
 		return fmt.Errorf("mongo URI must be specified")
 	}
-	if c.APIServer.JWTSecret == "" {
-		return fmt.Errorf("jwt secret must be specified")
-	}
+	// JWT secret is optional - if not set, authentication is disabled
 	return nil
 }
 

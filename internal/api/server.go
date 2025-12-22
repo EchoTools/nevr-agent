@@ -150,6 +150,9 @@ func (s *Server) setupRoutes() {
 	// WebSocket stream endpoint with JWT authentication (primary way to receive events)
 	v3.HandleFunc("/stream", JWTMiddleware(s.jwtSecret, s.WebSocketStreamHandler)).Methods("GET")
 
+	// Shorter WebSocket endpoint alias
+	s.router.HandleFunc("/ws", JWTMiddleware(s.jwtSecret, s.WebSocketStreamHandler)).Methods("GET")
+
 	// Add a NotFoundHandler for debugging unmatched routes
 	s.router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Route not found", "method", r.Method, "path", r.URL.Path)
