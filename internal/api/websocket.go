@@ -158,6 +158,9 @@ func (s *Server) processWebSocketMessage(ctx context.Context, message []byte, no
 		return nil
 	}
 
+	// Increment frame counter
+	s.frameCount.Add(1)
+
 	frame := msg.GetFrame()
 	lobbySessionID := frame.GetSession().GetSessionId()
 

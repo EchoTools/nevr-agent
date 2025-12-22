@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/echotools/nevr-agent/v4/internal/amqp"
@@ -33,6 +34,7 @@ type Server struct {
 	corsHandler     *cors.Cors
 	amqpPublisher   *amqp.Publisher
 	jwtSecret       string
+	frameCount      atomic.Int64
 }
 
 // Logger interface for abstracting logging
@@ -326,6 +328,9 @@ func (s *Server) StartWithContext(ctx context.Context, address string) error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Start frame counter logging goroutine
+	go s.logFrameStats(ctx)
+
 	// Start server in a goroutine
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -347,6 +352,25 @@ func (s *Server) StartWithContext(ctx context.Context, address string) error {
 
 	s.logger.Info("Server shutdown completed")
 	return nil
+}
+
+// logFrameStats periodically logs frame statistics
+func (s *Server) logFrameStats(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastCount int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentCount := s.frameCount.Load()
+			framesSinceLastLog := currentCount - lastCount
+			s.logger.Debug("Frame statistics", "total_frames", currentCount, "frames_last_5s", framesSinceLastLog)
+			lastCount = currentCount
+		}
+	}
 }
 
 type SessionResponse struct {
