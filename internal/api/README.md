@@ -1,10 +1,12 @@
 # Session Events Package
 
-This package provides a standalone HTTP service for storing and retrieving session events from MongoDB.
+This package provides HTTP/WebSocket services for storing and retrieving session events from MongoDB.
 
 ## Features
 
-- **HTTP API**: RESTful endpoints for session event management
+- **WebSocket Streaming**: Real-time event streaming via WebSocket (recommended)
+- **HTTP API**: RESTful endpoints for reading session events
+- **GraphQL API**: Query interface for session data
 - **MongoDB Storage**: Persistent storage with automatic indexing
 - **Graceful Shutdown**: Context-based shutdown handling
 - **Health Checks**: Built-in health monitoring
@@ -12,39 +14,30 @@ This package provides a standalone HTTP service for storing and retrieving sessi
 
 ## API Endpoints
 
-### Store Session Event
+### WebSocket Streaming (Write)
 ```
-POST /lobby-session-events
-```
-
-**Headers:**
-- `Content-Type: application/json`
-- `X-Node-ID: <node-id>` (optional, defaults to "default-node")
-- `X-User-ID: <user-id>` (optional)
-
-**Body:** JSON representation of `telemetry.LobbySessionStateFrame`
-
-**Response:**
-```json
-{
-  "success": true,
-  "match_id": "uuid.node"
-}
+WS /v3/stream
 ```
 
-### Get Session Events
+Connect via WebSocket to stream events in real-time. This is the primary method for sending session events.
+
+**Authentication:**
+- Include JWT token in query parameter: `?token=<jwt-token>`
+- Or use `Authorization: Bearer <token>` header during upgrade
+
+### Get Session Events (Read)
 ```
-GET /lobby-session-events/{match_id}
+GET /lobby-session-events/{lobby_session_id}
 ```
 
 **Response:**
 ```json
 {
-  "match_id": "uuid.node",
+  "lobby_session_id": "session-uuid",
   "count": 2,
   "events": [
     {
-      "match_id": "uuid.node",
+      "lobby_session_id": "session-uuid",
       "user_id": "user123",
       "data": { ... }
     }
@@ -67,65 +60,37 @@ GET /health
 
 ## Usage
 
-### As a Standalone Service
+### Streaming Events via WebSocket
 
-```go
-package main
+Use the `agent stream` command with `--events-stream` to stream session events:
 
-import (
-    "context"
-    "github.com/heroiclabs/nakama/v3/pkg/sessionevents"
-)
-
-func main() {
-    config := sessionevents.DefaultConfig()
-    config.MongoURI = "mongodb://localhost:27017"
-    config.ServerAddress = ":8080"
-
-    service, err := sessionevents.NewService(config, nil)
-    if err != nil {
-        panic(err)
-    }
-
-    ctx := context.Background()
-    if err := service.Initialize(ctx); err != nil {
-        panic(err)
-    }
-
-    if err := service.Start(ctx); err != nil {
-        panic(err)
-    }
-}
+```bash
+# Stream to events API via WebSocket
+agent stream --events-stream --events-url http://localhost:8081 127.0.0.1:6721
 ```
 
-### As a Library
+### Reading Events
 
 ```go
 package main
 
 import (
     "context"
-    "github.com/heroiclabs/nakama/v3/pkg/sessionevents"
-    "go.mongodb.org/mongo-driver/mongo"
+    "github.com/echotools/nevr-agent/v4/internal/api"
 )
 
 func main() {
-    // Use individual functions
-    var mongoClient *mongo.Client // ... initialize
-    
-    event := &sessionevents.SessionEvent{
-        MatchID: sessionevents.MatchID{
-            UUID: uuid.New(),
-            Node: "node1",
-        },
-        UserID: "user123",
-        Data:   nil, // Your telemetry.LobbySessionStateFrame
-    }
+    client := api.NewClient(api.ClientConfig{
+        BaseURL:  "http://localhost:8081",
+        JWTToken: "your-jwt-token",
+    })
 
-    err := sessionevents.StoreSessionEvent(context.Background(), mongoClient, event)
+    events, err := client.GetSessionEvents(context.Background(), "session-uuid")
     if err != nil {
         panic(err)
     }
+    
+    // Process events...
 }
 ```
 
@@ -134,7 +99,7 @@ func main() {
 ### Environment Variables
 
 - `MONGO_URI`: MongoDB connection string (default: "mongodb://localhost:27017")
-- `SERVER_ADDRESS`: HTTP server bind address (default: ":8080")
+- `SERVER_ADDRESS`: HTTP server bind address (default: ":8081")
 
 ### Configuration Struct
 
@@ -149,22 +114,10 @@ type Config struct {
 }
 ```
 
-## Running the Example
-
-```bash
-# Set environment variables (optional)
-export MONGO_URI="mongodb://localhost:27017"
-export SERVER_ADDRESS=":8080"
-
-# Run the example
-go run cmd/main.go
-```
-
 ## Dependencies
 
-- `github.com/echotools/nevr-common/v4/gen/go/rtapi` - Protocol buffer definitions
-- `github.com/gofrs/uuid/v5` - UUID generation and parsing
-- `github.com/gorilla/mux` - HTTP routing
+- `github.com/echotools/nevr-common/v4/gen/go/telemetry/v1` - Protocol buffer definitions
+- `github.com/gorilla/websocket` - WebSocket support
 - `go.mongodb.org/mongo-driver` - MongoDB driver
 - `google.golang.org/protobuf` - Protocol buffer support
 
@@ -175,11 +128,15 @@ The package stores session events in MongoDB with the following structure:
 ```json
 {
   "_id": "ObjectId",
-  "match_id": "uuid.node",
+  "lobby_session_id": "string",
   "user_id": "string",
-  "data": {
+  "frame": {
     // telemetry.LobbySessionStateFrame data
-  }
+  },
+  "event_types": ["array", "of", "event", "types"],
+  "timestamp": "ISODate",
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
 }
 ```
 
@@ -187,5 +144,5 @@ The package stores session events in MongoDB with the following structure:
 
 The service automatically creates the following indexes:
 
-1. `{ "match_id": 1 }` - For efficient match-based queries
-2. `{ "match_id": 1, "timestamp": 1 }` - For sorted temporal queries
+1. `{ "lobby_session_id": 1 }` - For efficient session-based queries
+2. `{ "lobby_session_id": 1, "timestamp": 1 }` - For sorted temporal queries

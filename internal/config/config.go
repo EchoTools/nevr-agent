@@ -39,12 +39,8 @@ type AgentConfig struct {
 	Format          string `yaml:"format"`
 	OutputDirectory string `yaml:"output_directory"`
 
-	// JWT token for API authentication (used for both stream and events APIs)
+	// JWT token for API authentication (used for stream APIs)
 	JWTToken string `yaml:"jwt_token"`
-
-	// Events API configuration
-	EventsEnabled bool   `yaml:"events_enabled"`
-	EventsURL     string `yaml:"events_url"`
 }
 
 // APIServerConfig holds configuration for the API server subcommand
@@ -53,6 +49,11 @@ type APIServerConfig struct {
 	MongoURI      string `yaml:"mongo_uri"`
 	JWTSecret     string `yaml:"jwt_secret"`
 
+	// AMQP configuration
+	AMQPEnabled   bool   `yaml:"amqp_enabled"`
+	AMQPURI       string `yaml:"amqp_uri"`
+	AMQPQueueName string `yaml:"amqp_queue_name"`
+
 	// Capture storage configuration
 	CaptureDir       string `yaml:"capture_dir"`
 	CaptureRetention string `yaml:"capture_retention"` // Duration string (e.g., "24h", "7d")
@@ -60,6 +61,9 @@ type APIServerConfig struct {
 
 	// Rate limiting
 	MaxStreamHz int `yaml:"max_stream_hz"` // Max frames per second from clients
+
+	// CORS configuration
+	CORSOrigins string `yaml:"cors_origins"` // Comma-separated list of allowed origins
 
 	// Metrics
 	MetricsAddr string `yaml:"metrics_addr"` // Prometheus metrics endpoint address
@@ -92,16 +96,19 @@ func DefaultConfig() *Config {
 			Frequency:       10,
 			Format:          "nevrcap",
 			OutputDirectory: "output",
-			EventsURL:       "http://localhost:8081",
 		},
 		APIServer: APIServerConfig{
 			ServerAddress:    ":8081",
 			MongoURI:         "mongodb://localhost:27017",
 			JWTSecret:        "",
+			AMQPEnabled:      false,
+			AMQPURI:          "amqp://guest:guest@localhost:5672/",
+			AMQPQueueName:    "match.events",
 			CaptureDir:       "./captures",
 			CaptureRetention: "168h",                  // 7 days
 			CaptureMaxSize:   10 * 1024 * 1024 * 1024, // 10GB
 			MaxStreamHz:      60,
+			CORSOrigins:      "*",
 			MetricsAddr:      "",
 		},
 		Converter: ConverterConfig{
@@ -169,9 +176,6 @@ func applyEnvOverrides(c *Config) {
 	if v := getEnv("AGENT_JWT_TOKEN"); v != "" {
 		c.Agent.JWTToken = v
 	}
-	if v := getEnv("AGENT_EVENTS_URL"); v != "" {
-		c.Agent.EventsURL = v
-	}
 
 	// API Server
 	if v := getEnv("APISERVER_SERVER_ADDRESS"); v != "" {
@@ -196,6 +200,19 @@ func applyEnvOverrides(c *Config) {
 		if hz, err := strconv.Atoi(v); err == nil {
 			c.APIServer.MaxStreamHz = hz
 		}
+	}
+	if v := getEnv("APISERVER_CORS_ORIGINS"); v != "" {
+		c.APIServer.CORSOrigins = v
+	}
+	// AMQP configuration
+	if v := getEnv("APISERVER_AMQP_ENABLED"); v != "" {
+		c.APIServer.AMQPEnabled = v == "true" || v == "1"
+	}
+	if v := getEnv("APISERVER_AMQP_URI"); v != "" {
+		c.APIServer.AMQPURI = v
+	}
+	if v := getEnv("APISERVER_AMQP_QUEUE_NAME"); v != "" {
+		c.APIServer.AMQPQueueName = v
 	}
 }
 
