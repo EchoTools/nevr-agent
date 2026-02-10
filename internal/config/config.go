@@ -229,6 +229,8 @@ func applyEnvOverrides(c *Config) {
 	}
 	
 	// Converter configuration
+	// Note: getEnv automatically checks both NEVR_ and EVR_ prefixes
+	// So getEnv("CONVERTER_INPUT_FILE") checks both NEVR_CONVERTER_INPUT_FILE and EVR_CONVERTER_INPUT_FILE
 	if v := getEnv("CONVERTER_INPUT_FILE"); v != "" {
 		c.Converter.InputFile = v
 	}
