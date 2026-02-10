@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -226,6 +227,46 @@ func applyEnvOverrides(c *Config) {
 	if v := getEnv("APISERVER_AMQP_QUEUE_NAME"); v != "" {
 		c.APIServer.AMQPQueueName = v
 	}
+	
+	// Converter configuration
+	if v := getEnv("CONVERTER_INPUT_FILE"); v != "" {
+		c.Converter.InputFile = v
+	}
+	if v := getEnv("CONVERTER_OUTPUT_FILE"); v != "" {
+		c.Converter.OutputFile = v
+	}
+	if v := getEnv("CONVERTER_OUTPUT_DIR"); v != "" {
+		c.Converter.OutputDir = v
+	}
+	if v := getEnv("CONVERTER_FORMAT"); v != "" {
+		c.Converter.Format = v
+	}
+	if v := getEnv("CONVERTER_VERBOSE"); v != "" {
+		c.Converter.Verbose = parseBool(v)
+	}
+	if v := getEnv("CONVERTER_OVERWRITE"); v != "" {
+		c.Converter.Overwrite = parseBool(v)
+	}
+	if v := getEnv("CONVERTER_EXCLUDE_BONES"); v != "" {
+		c.Converter.ExcludeBones = parseBool(v)
+	}
+	if v := getEnv("CONVERTER_RECURSIVE"); v != "" {
+		c.Converter.Recursive = parseBool(v)
+	}
+	if v := getEnv("CONVERTER_GLOB"); v != "" {
+		c.Converter.Glob = v
+	}
+	if v := getEnv("CONVERTER_VALIDATE"); v != "" {
+		c.Converter.Validate = parseBool(v)
+	}
+}
+
+// parseBool parses a boolean value from a string
+// Accepts: "true", "1", "yes", "on" (case-insensitive) as true
+// Everything else is false
+func parseBool(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return s == "true" || s == "1" || s == "yes" || s == "on"
 }
 
 // NewLogger creates a zap logger based on the configuration
@@ -314,12 +355,219 @@ func (c *Config) ValidateAPIServerConfig() error {
 
 // ValidateConverterConfig validates converter configuration
 func (c *Config) ValidateConverterConfig() error {
-	if c.Converter.InputFile == "" {
-		return fmt.Errorf("input file must be specified")
+	cfg := &c.Converter
+	
+	// 1. Required fields validation
+	if err := validateRequiredFields(cfg); err != nil {
+		return err
 	}
-	if _, err := os.Stat(c.Converter.InputFile); os.IsNotExist(err) {
-		return fmt.Errorf("input file does not exist: %s", c.Converter.InputFile)
+	
+	// 2. Format validation
+	if err := validateFormat(cfg); err != nil {
+		return err
 	}
+	
+	// 3. Flag combination rules
+	if err := validateFlagCombinations(cfg); err != nil {
+		return err
+	}
+	
+	// 4. File system validation
+	if err := validateFileSystem(cfg); err != nil {
+		return err
+	}
+	
+	// 5. Glob pattern validation
+	if err := validateGlobPattern(cfg); err != nil {
+		return err
+	}
+	
+	return nil
+}
+
+// validateRequiredFields validates required converter configuration fields
+func validateRequiredFields(cfg *ConverterConfig) error {
+	// InputFile is required
+	if cfg.InputFile == "" || strings.TrimSpace(cfg.InputFile) == "" {
+		return fmt.Errorf("input file is required")
+	}
+	
+	// Either OutputFile or OutputDir is required
+	if cfg.OutputFile == "" && cfg.OutputDir == "" {
+		return fmt.Errorf("either output file or output directory is required")
+	}
+	
+	// Both OutputFile and OutputDir cannot be specified (ambiguous)
+	if cfg.OutputFile != "" && cfg.OutputDir != "" {
+		return fmt.Errorf("cannot specify both output file and output directory")
+	}
+	
+	return nil
+}
+
+// validateFormat validates and normalizes the format field
+func validateFormat(cfg *ConverterConfig) error {
+	// Normalize format to lowercase and trim spaces
+	cfg.Format = strings.ToLower(strings.TrimSpace(cfg.Format))
+	
+	// Default empty format to "auto"
+	if cfg.Format == "" {
+		cfg.Format = "auto"
+	}
+	
+	// Validate against allowed formats
+	allowedFormats := map[string]bool{
+		"auto":       true,
+		"echoreplay": true,
+		"nevrcap":    true,
+	}
+	
+	if !allowedFormats[cfg.Format] {
+		return fmt.Errorf("invalid format: %s (must be auto, echoreplay, or nevrcap)", cfg.Format)
+	}
+	
+	return nil
+}
+
+// validateFlagCombinations validates flag combination rules
+func validateFlagCombinations(cfg *ConverterConfig) error {
+	// Validate flag cannot be used with Recursive or Glob
+	if cfg.Validate && cfg.Recursive {
+		return fmt.Errorf("--validate flag cannot be used with --recursive")
+	}
+	if cfg.Validate && cfg.Glob != "" {
+		return fmt.Errorf("--validate flag cannot be used with --glob")
+	}
+	
+	// Validate with ExcludeBones causes validation failures
+	if cfg.Validate && cfg.ExcludeBones {
+		return fmt.Errorf("--validate cannot be used with --exclude-bones (would cause validation to fail)")
+	}
+	
+	// Recursive or Glob requires OutputDir
+	if cfg.Recursive && cfg.OutputDir == "" {
+		return fmt.Errorf("--output-dir is required when using --recursive")
+	}
+	if cfg.Glob != "" && cfg.OutputDir == "" {
+		return fmt.Errorf("--output-dir is required when using --glob")
+	}
+	
+	// Recursive or Glob with OutputFile is invalid (batch needs dir)
+	if cfg.Recursive && cfg.OutputFile != "" {
+		return fmt.Errorf("--output cannot be used with --recursive (output files will be auto-generated)")
+	}
+	if cfg.Glob != "" && cfg.OutputFile != "" {
+		return fmt.Errorf("--output cannot be used with --glob (output files will be auto-generated)")
+	}
+	
+	return nil
+}
+
+// validateFileSystem validates file system paths and permissions
+func validateFileSystem(cfg *ConverterConfig) error {
+	// Validate InputFile exists
+	inputInfo, err := os.Stat(cfg.InputFile)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("input file does not exist: %s", cfg.InputFile)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access input file: %w", err)
+	}
+	
+	// Check if InputFile is a directory or file based on Recursive flag
+	if cfg.Recursive {
+		if !inputInfo.IsDir() {
+			return fmt.Errorf("input must be a directory when using --recursive: %s", cfg.InputFile)
+		}
+	} else {
+		if inputInfo.IsDir() {
+			return fmt.Errorf("input must be a file, not a directory: %s (use --recursive for directories)", cfg.InputFile)
+		}
+		// Check if it's a regular file (not device, socket, etc.)
+		if !inputInfo.Mode().IsRegular() {
+			return fmt.Errorf("input must be a regular file: %s", cfg.InputFile)
+		}
+	}
+	
+	// Validate OutputDir if specified
+	if cfg.OutputDir != "" {
+		// Check if OutputDir exists
+		outputDirInfo, err := os.Stat(cfg.OutputDir)
+		if err == nil {
+			// Exists - verify it's a directory
+			if !outputDirInfo.IsDir() {
+				return fmt.Errorf("output directory path is not a directory: %s", cfg.OutputDir)
+			}
+			// Check if writable by attempting to create a temp file
+			testFile := filepath.Join(cfg.OutputDir, ".write_test")
+			f, err := os.Create(testFile)
+			if err != nil {
+				return fmt.Errorf("output directory is not writable: %s", cfg.OutputDir)
+			}
+			f.Close()
+			os.Remove(testFile)
+		} else if os.IsNotExist(err) {
+			// Doesn't exist - check if parent exists and is writable
+			parentDir := filepath.Dir(cfg.OutputDir)
+			if parentDir != cfg.OutputDir {
+				parentInfo, err := os.Stat(parentDir)
+				if os.IsNotExist(err) {
+					return fmt.Errorf("output directory parent does not exist: %s", parentDir)
+				}
+				if err != nil {
+					return fmt.Errorf("cannot access output directory parent: %w", err)
+				}
+				if !parentInfo.IsDir() {
+					return fmt.Errorf("output directory parent is not a directory: %s", parentDir)
+				}
+			}
+		} else {
+			return fmt.Errorf("cannot access output directory: %w", err)
+		}
+	}
+	
+	// Validate OutputFile if specified
+	if cfg.OutputFile != "" {
+		// Check if output file already exists
+		if _, err := os.Stat(cfg.OutputFile); err == nil {
+			// File exists
+			if !cfg.Overwrite {
+				return fmt.Errorf("output file already exists (use --overwrite to replace): %s", cfg.OutputFile)
+			}
+		}
+		
+		// Check if parent directory exists and is writable
+		outputDir := filepath.Dir(cfg.OutputFile)
+		if outputDir != "" && outputDir != "." {
+			parentInfo, err := os.Stat(outputDir)
+			if os.IsNotExist(err) {
+				return fmt.Errorf("output file parent directory does not exist: %s", outputDir)
+			}
+			if err != nil {
+				return fmt.Errorf("cannot access output file parent directory: %w", err)
+			}
+			if !parentInfo.IsDir() {
+				return fmt.Errorf("output file parent path is not a directory: %s", outputDir)
+			}
+		}
+	}
+	
+	return nil
+}
+
+// validateGlobPattern validates glob pattern syntax
+func validateGlobPattern(cfg *ConverterConfig) error {
+	if cfg.Glob == "" {
+		return nil
+	}
+	
+	// Validate glob pattern syntax using filepath.Match
+	// We test with a dummy filename
+	_, err := filepath.Match(cfg.Glob, "test.echoreplay")
+	if err != nil {
+		return fmt.Errorf("invalid glob pattern: %w", err)
+	}
+	
 	return nil
 }
 
