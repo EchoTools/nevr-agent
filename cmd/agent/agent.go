@@ -23,7 +23,6 @@ type StreamConfig struct {
 	Frequency     int
 	Format        string
 	OutputDir     string
-	Events        bool
 	EventsStream  bool
 	EventsURL     string
 	JWTToken      string   // JWT token for API authentication
@@ -42,7 +41,6 @@ func newAgentCommand() *cobra.Command {
 		frequency     int
 		format        string
 		outputDir     string
-		events        bool
 		eventsStream  bool
 		eventsURL     string
 		jwtToken      string
@@ -67,7 +65,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
   agent stream --frequency 30 --output ./output 127.0.0.1:6721-6730
 
   # Stream to events API without saving files locally
-  agent stream --format none --events-stream --events-url http://localhost:8081 127.0.0.1:6721
+  agent stream --format none --events-stream --events-url ws://localhost:8081/ws 127.0.0.1:6721
 
   # Use a config file
   agent stream -c config.yaml 127.0.0.1:6721
@@ -79,11 +77,10 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
   agent stream --include-modes echo_arena --active-only 127.0.0.1:6721`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-				streamCfg := StreamConfig{
+			streamCfg := StreamConfig{
 				Frequency:     frequency,
 				Format:        format,
 				OutputDir:     outputDir,
-				Events:        events,
 				EventsStream:  eventsStream,
 				EventsURL:     eventsURL,
 				JWTToken:      jwtToken,
@@ -102,13 +99,12 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 
 	// Agent-specific flags
 	cmd.Flags().IntVarP(&frequency, "frequency", "f", 10, "Polling frequency in Hz")
-	cmd.Flags().StringVar(&format, "format", "replay", "Output format (replay, none, or comma-separated)")
+	cmd.Flags().StringVar(&format, "format", "nevrcap", "Output format (nevrcap, echoreplay, none, or comma-separated)")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "output", "Output directory for recorded files")
 
 	// Events API options
-	cmd.Flags().BoolVar(&events, "events", false, "Enable sending frames to events API")
 	cmd.Flags().BoolVar(&eventsStream, "events-stream", false, "Enable streaming frames to events API via WebSocket")
-	cmd.Flags().StringVar(&eventsURL, "events-url", "http://localhost:8081", "Base URL of the events API")
+	cmd.Flags().StringVar(&eventsURL, "events-url", "ws://localhost:8081/ws", "Full WebSocket URL for streaming events")
 	cmd.Flags().StringVar(&jwtToken, "jwt-token", "", "JWT token for API authentication")
 
 	// Stream filtering options
@@ -125,15 +121,25 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 }
 
 func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
-	// Override config with command flags
+	// Override config with command flags (only if explicitly set)
 	cfg.Agent.Frequency = streamCfg.Frequency
 	cfg.Agent.Format = streamCfg.Format
 	cfg.Agent.OutputDirectory = streamCfg.OutputDir
-	cfg.Agent.EventsEnabled = streamCfg.Events
-	cfg.Agent.EventsURL = streamCfg.EventsURL
+
+	// Merge JWT token: CLI flag takes precedence over config file
+	if streamCfg.JWTToken != "" {
+		cfg.Agent.JWTToken = streamCfg.JWTToken
+	}
+
+	// Log JWT token status for debugging
+	if cfg.Agent.JWTToken != "" {
+		logger.Debug("JWT token configured", zap.Int("token_length", len(cfg.Agent.JWTToken)))
+	} else {
+		logger.Debug("No JWT token configured")
+	}
 
 	// If only streaming to events API, we don't need file output
-	if streamCfg.EventsStream || streamCfg.Events {
+	if streamCfg.EventsStream {
 		// Check if any file format is specified
 		hasFileFormat := false
 		for _, f := range strings.Split(streamCfg.Format, ",") {
@@ -200,6 +206,7 @@ func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
 }
 
 func startAgent(ctx context.Context, logger *zap.Logger, targets map[string][]int, streamCfg StreamConfig) {
+	baseLogger := logger // Keep reference to base logger for WebSocket writer
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
@@ -286,14 +293,20 @@ OuterLoop:
 					}
 
 					switch format {
-					case "replay":
-						fallthrough
-					default:
+					case "echoreplay", "replay":
 						filename = agent.EchoReplaySessionFilename(time.Now(), meta.SessionUUID)
 						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
 						replayWriter := agent.NewFrameDataLogSession(ctx, logger, outputPath, meta.SessionUUID)
 						go replayWriter.ProcessFrames()
 						writers = append(writers, replayWriter)
+					case "nevrcap":
+						fallthrough
+					default:
+						filename = agent.NevrCapSessionFilename(time.Now(), meta.SessionUUID)
+						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
+						nevrcapWriter := agent.NewNevrCapLogSession(ctx, logger, outputPath, meta.SessionUUID)
+						go nevrcapWriter.ProcessFrames()
+						writers = append(writers, nevrcapWriter)
 					}
 				}
 
@@ -302,23 +315,11 @@ OuterLoop:
 					logger = logger.With(zap.String("filename", filename))
 				}
 
-				// If events sending is enabled, add EventsAPI writer
-				if cfg.Agent.EventsEnabled {
-					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
-					eventsWriter := agent.NewEventsAPIWriter(logger, streamCfg.EventsURL, token)
-					writers = append(writers, eventsWriter)
-				}
 				// If events streaming is enabled, add WebSocket writer
 				if streamCfg.EventsStream {
-					// Derive WebSocket URL from Events URL if not explicitly set
 					wsURL := streamCfg.EventsURL
-					if strings.HasPrefix(wsURL, "http") {
-						wsURL = strings.Replace(wsURL, "http", "ws", 1)
-					}
-					wsURL = strings.TrimSuffix(wsURL, "/") + "/v3/stream"
-
 					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
-					wsWriter := agent.NewWebSocketWriter(logger, wsURL, token)
+					wsWriter := agent.NewWebSocketWriter(baseLogger, wsURL, token)
 					if err := wsWriter.Connect(); err != nil {
 						logger.Error("Failed to connect WebSocket writer", zap.Error(err))
 					} else {

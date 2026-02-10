@@ -41,6 +41,11 @@ func StoreSessionFrame(ctx context.Context, mongoClient *mongo.Client, lobbySess
 		return fmt.Errorf("frame is nil")
 	}
 
+	// Skip frames without events
+	if len(frame.GetEvents()) == 0 {
+		return nil
+	}
+
 	collection := mongoClient.Database(sessionEventDatabaseName).Collection(sessionEventCollectionName)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)

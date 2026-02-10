@@ -352,3 +352,77 @@ func (sm *StorageManager) GetStorageStats() (totalSize int64, fileCount int, act
 
 	return totalSize, len(files), activeMatches
 }
+
+// MatchInfo represents information about a stored match
+type MatchInfo struct {
+	ID        string    `json:"id"`
+	FilePath  string    `json:"file_path,omitempty"`
+	FileSize  int64     `json:"file_size"`
+	CreatedAt time.Time `json:"created_at"`
+	Status    string    `json:"status"` // "active" or "completed"
+}
+
+// ListMatches returns a list of all matches (both active and completed)
+func (sm *StorageManager) ListMatches(status string, limit int) ([]MatchInfo, error) {
+	matches := make([]MatchInfo, 0)
+
+	// Get active matches
+	if status == "" || status == "active" {
+		sm.mu.RLock()
+		for matchID, w := range sm.activeWriters {
+			matches = append(matches, MatchInfo{
+				ID:        matchID,
+				CreatedAt: w.createdAt,
+				Status:    "active",
+			})
+		}
+		sm.mu.RUnlock()
+	}
+
+	// Get completed matches from files
+	if status == "" || status == "completed" {
+		files, err := sm.getFiles()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list files: %w", err)
+		}
+
+		// Sort by mod time descending (newest first)
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].modTime.After(files[j].modTime)
+		})
+
+		for _, f := range files {
+			if !strings.HasSuffix(f.path, ".nevrcap") {
+				continue
+			}
+
+			matchID := extractMatchID(f.path)
+			if matchID == "" {
+				continue
+			}
+
+			// Skip active matches
+			sm.mu.RLock()
+			_, isActive := sm.activeWriters[matchID]
+			sm.mu.RUnlock()
+			if isActive {
+				continue
+			}
+
+			matches = append(matches, MatchInfo{
+				ID:        matchID,
+				FilePath:  f.path,
+				FileSize:  f.size,
+				CreatedAt: f.modTime,
+				Status:    "completed",
+			})
+		}
+	}
+
+	// Apply limit
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+
+	return matches, nil
+}

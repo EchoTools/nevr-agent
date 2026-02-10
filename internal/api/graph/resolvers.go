@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	sessionEventDatabaseName   = "nakama"
+	sessionEventDatabaseName   = "nevr_telemetry"
 	sessionEventCollectionName = "session_events"
 )
 
@@ -207,84 +207,6 @@ func (r *Resolver) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// Mutation resolvers
-
-// StoreSessionEvent resolves the storeSessionEvent mutation
-func (r *Resolver) StoreSessionEvent(ctx context.Context, input StoreSessionEventInput) (*StoreSessionEventPayload, error) {
-	collection := r.MongoClient.Database(sessionEventDatabaseName).Collection(sessionEventCollectionName)
-
-	// Convert input.FrameData (map[string]any) to LobbySessionStateFrame
-	frameDataBytes, err := json.Marshal(input.FrameData)
-	if err != nil {
-		errMsg := fmt.Sprintf("failed to serialize frame data: %v", err)
-		return &StoreSessionEventPayload{
-			Success: false,
-			Error:   &errMsg,
-		}, nil
-	}
-
-	frame := &telemetry.LobbySessionStateFrame{}
-	if err := protojson.Unmarshal(frameDataBytes, frame); err != nil {
-		errMsg := fmt.Sprintf("failed to parse frame data: %v", err)
-		return &StoreSessionEventPayload{
-			Success: false,
-			Error:   &errMsg,
-		}, nil
-	}
-
-	userID := ""
-	if input.UserID != nil {
-		userID = *input.UserID
-	}
-
-	// Extract event types
-	eventTypes := make([]string, 0, len(frame.GetEvents()))
-	for _, evt := range frame.GetEvents() {
-		if evt != nil && evt.Event != nil {
-			// Get the event type name from the oneof
-			eventType := fmt.Sprintf("%T", evt.Event)
-			eventTypes = append(eventTypes, eventType)
-		}
-	}
-
-	now := time.Now().UTC()
-	doc := &SessionFrameDocument{
-		ID:             primitive.NewObjectID(),
-		LobbySessionID: input.LobbySessionID,
-		UserID:         userID,
-		Frame:          frame,
-		EventTypes:     eventTypes,
-		Timestamp:      frame.Timestamp.AsTime(),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	_, err = collection.InsertOne(ctx, doc)
-	if err != nil {
-		errMsg := fmt.Sprintf("failed to store frame: %v", err)
-		return &StoreSessionEventPayload{
-			Success: false,
-			Error:   &errMsg,
-		}, nil
-	}
-
-	return &StoreSessionEventPayload{
-		Success: true,
-		Event: &SessionEvent{
-			ID:             doc.ID.Hex(),
-			LobbySessionID: doc.LobbySessionID,
-			UserID:         &doc.UserID,
-			FrameData:      input.FrameData,
-			Timestamp:      doc.Timestamp,
-			CreatedAt:      doc.CreatedAt,
-			UpdatedAt:      doc.UpdatedAt,
-		},
-	}, nil
-}
-
 // LobbySession field resolvers
 
 // Events resolves the events field on LobbySession
@@ -351,16 +273,4 @@ type HealthStatus struct {
 	Status    string    `json:"status"`
 	Timestamp time.Time `json:"timestamp"`
 	Database  string    `json:"database"`
-}
-
-type StoreSessionEventInput struct {
-	LobbySessionID string         `json:"lobbySessionId"`
-	UserID         *string        `json:"userId"`
-	FrameData      map[string]any `json:"frameData"`
-}
-
-type StoreSessionEventPayload struct {
-	Success bool          `json:"success"`
-	Event   *SessionEvent `json:"event"`
-	Error   *string       `json:"error"`
 }

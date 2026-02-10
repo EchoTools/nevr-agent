@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
-	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // Client represents a client for the session events service
@@ -49,12 +47,6 @@ func NewClient(config ClientConfig) *Client {
 	}
 }
 
-// StoreSessionEventResponse represents the response from storing a session event
-type StoreSessionEventResponse struct {
-	Success          bool   `json:"success"`
-	LobbySessionUUID string `json:"lobby_session_id"`
-}
-
 // GetSessionEventsResponse represents the response from retrieving session events
 type GetSessionEventsResponse struct {
 	LobbySessionUUID string                              `json:"lobby_session_id"`
@@ -66,54 +58,6 @@ type GetSessionEventsResponse struct {
 type HealthResponse struct {
 	Status    string `json:"status"`
 	Timestamp string `json:"timestamp"`
-}
-
-// StoreSessionEvent stores a session event to the server
-func (c *Client) StoreSessionEvent(ctx context.Context, event *telemetry.LobbySessionStateFrame) (*StoreSessionEventResponse, error) {
-	// Convert protobuf to JSON
-	jsonData, err := protojson.Marshal(event)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal protobuf to JSON: %w", err)
-	}
-
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/lobby-session-events", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
-	if c.jwtToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.jwtToken)
-	}
-
-	// Send request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned error: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-	}
-
-	// Parse response
-	var response StoreSessionEventResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &response, nil
 }
 
 // GetSessionEvents retrieves session events by match ID

@@ -3,82 +3,95 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds all configuration for the application
 type Config struct {
 	// Global configuration
-	Debug      bool   `yaml:"debug" mapstructure:"debug"`
-	LogLevel   string `yaml:"log_level" mapstructure:"log_level"`
-	LogFile    string `yaml:"log_file" mapstructure:"log_file"`
-	ConfigFile string `yaml:"config" mapstructure:"config"`
+	Debug      bool   `yaml:"debug"`
+	LogLevel   string `yaml:"log_level"`
+	LogFile    string `yaml:"log_file"`
+	ConfigFile string `yaml:"-"` // Not loaded from yaml
 
 	// Agent configuration
-	Agent AgentConfig `yaml:"agent" mapstructure:"agent"`
+	Agent AgentConfig `yaml:"agent"`
 
 	// API Server configuration
-	APIServer APIServerConfig `yaml:"apiserver" mapstructure:"apiserver"`
+	APIServer APIServerConfig `yaml:"apiserver"`
 
 	// Converter configuration
-	Converter ConverterConfig `yaml:"converter" mapstructure:"converter"`
+	Converter ConverterConfig `yaml:"converter"`
 
 	// Replayer configuration
-	Replayer ReplayerConfig `yaml:"replayer" mapstructure:"replayer"`
+	Replayer ReplayerConfig `yaml:"replayer"`
 }
 
 // AgentConfig holds configuration for the agent subcommand
 type AgentConfig struct {
-	Frequency       int    `yaml:"frequency" mapstructure:"frequency"`
-	Format          string `yaml:"format" mapstructure:"format"`
-	OutputDirectory string `yaml:"output_directory" mapstructure:"output_directory"`
+	Frequency       int    `yaml:"frequency"`
+	Format          string `yaml:"format"`
+	OutputDirectory string `yaml:"output_directory"`
 
-	// JWT token for API authentication (used for both stream and events APIs)
-	JWTToken string `yaml:"jwt_token" mapstructure:"jwt_token"`
-
-	// Events API configuration
-	EventsEnabled bool   `yaml:"events_enabled" mapstructure:"events_enabled"`
-	EventsURL     string `yaml:"events_url" mapstructure:"events_url"`
+	// JWT token for API authentication (used for stream APIs)
+	JWTToken string `yaml:"jwt_token"`
 }
 
 // APIServerConfig holds configuration for the API server subcommand
 type APIServerConfig struct {
-	ServerAddress string `yaml:"server_address" mapstructure:"server_address"`
-	MongoURI      string `yaml:"mongo_uri" mapstructure:"mongo_uri"`
-	JWTSecret     string `yaml:"jwt_secret" mapstructure:"jwt_secret"`
+	ServerAddress string `yaml:"server_address"`
+	MongoURI      string `yaml:"mongo_uri"`
+	JWTSecret     string `yaml:"jwt_secret"`
+
+	// AMQP configuration
+	AMQPEnabled   bool   `yaml:"amqp_enabled"`
+	AMQPURI       string `yaml:"amqp_uri"`
+	AMQPQueueName string `yaml:"amqp_queue_name"`
 
 	// Capture storage configuration
-	CaptureDir       string `yaml:"capture_dir" mapstructure:"capture_dir"`
-	CaptureRetention string `yaml:"capture_retention" mapstructure:"capture_retention"` // Duration string (e.g., "24h", "7d")
-	CaptureMaxSize   int64  `yaml:"capture_max_size" mapstructure:"capture_max_size"`   // Max storage in bytes
+	CaptureDir       string `yaml:"capture_dir"`
+	CaptureRetention string `yaml:"capture_retention"` // Duration string (e.g., "24h", "7d")
+	CaptureMaxSize   int64  `yaml:"capture_max_size"`  // Max storage in bytes
 
 	// Rate limiting
-	MaxStreamHz int `yaml:"max_stream_hz" mapstructure:"max_stream_hz"` // Max frames per second from clients
+	MaxStreamHz int `yaml:"max_stream_hz"` // Max frames per second from clients
+
+	// CORS configuration
+	CORSOrigins string `yaml:"cors_origins"` // Comma-separated list of allowed origins
 
 	// Metrics
-	MetricsAddr string `yaml:"metrics_addr" mapstructure:"metrics_addr"` // Prometheus metrics endpoint address
+	MetricsAddr string `yaml:"metrics_addr"` // Prometheus metrics endpoint address
+
+	// Node identifier for this agent instance
+	NodeID string `yaml:"node_id"`
 }
 
 // ConverterConfig holds configuration for the converter subcommand
 type ConverterConfig struct {
-	InputFile  string `yaml:"input_file" mapstructure:"input_file"`
-	OutputFile string `yaml:"output_file" mapstructure:"output_file"`
-	OutputDir  string `yaml:"output_dir" mapstructure:"output_dir"`
-	Format     string `yaml:"format" mapstructure:"format"`
-	Verbose    bool   `yaml:"verbose" mapstructure:"verbose"`
-	Overwrite  bool   `yaml:"overwrite" mapstructure:"overwrite"`
+	InputFile    string `yaml:"input_file"`
+	OutputFile   string `yaml:"output_file"`
+	OutputDir    string `yaml:"output_dir"`
+	Format       string `yaml:"format"`
+	Verbose      bool   `yaml:"verbose"`
+	Overwrite    bool   `yaml:"overwrite"`
+	ExcludeBones bool   `yaml:"exclude_bones"`
+	Recursive    bool   `yaml:"recursive"`
+	Glob         string `yaml:"glob"`
+	Validate     bool   `yaml:"validate"`
 }
 
 // ReplayerConfig holds configuration for the replayer subcommand
 type ReplayerConfig struct {
-	BindAddress string   `yaml:"bind_address" mapstructure:"bind_address"`
-	Loop        bool     `yaml:"loop" mapstructure:"loop"`
-	Files       []string `yaml:"files" mapstructure:"files"`
+	BindAddress string   `yaml:"bind_address"`
+	Loop        bool     `yaml:"loop"`
+	Files       []string `yaml:"files"`
 }
 
 // DefaultConfig returns a Config with default values
@@ -91,17 +104,21 @@ func DefaultConfig() *Config {
 			Frequency:       10,
 			Format:          "nevrcap",
 			OutputDirectory: "output",
-			EventsURL:       "http://localhost:8081",
 		},
 		APIServer: APIServerConfig{
 			ServerAddress:    ":8081",
 			MongoURI:         "mongodb://localhost:27017",
 			JWTSecret:        "",
+			AMQPEnabled:      false,
+			AMQPURI:          "amqp://guest:guest@localhost:5672/",
+			AMQPQueueName:    "match.events",
 			CaptureDir:       "./captures",
 			CaptureRetention: "168h",                  // 7 days
 			CaptureMaxSize:   10 * 1024 * 1024 * 1024, // 10GB
 			MaxStreamHz:      60,
+			CORSOrigins:      "*",
 			MetricsAddr:      "",
+			NodeID:           "", // Will use hostname if empty
 		},
 		Converter: ConverterConfig{
 			OutputDir: "./",
@@ -114,40 +131,101 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig loads configuration from file, environment variables, and CLI flags
+// LoadConfig loads configuration from file and environment variables.
+// Priority: defaults < config file < environment variables
+// CLI flags are handled separately by the command layer.
 func LoadConfig(configFile string) (*Config, error) {
 	// Load .env file if it exists
 	_ = godotenv.Load()
 
+	// Start with defaults
 	config := DefaultConfig()
-
-	// Set up viper for config file and environment variables
-	// Use a local viper instance to avoid conflicts with flag bindings
-	v := viper.New()
-	v.SetConfigType("yaml")
+	config.ConfigFile = configFile
 
 	// Load config file if specified
 	if configFile != "" {
-		v.SetConfigFile(configFile)
-		if err := v.ReadInConfig(); err != nil {
-			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-				return nil, fmt.Errorf("error reading config file: %w", err)
-			}
-			// Config file not found; ignore error
+		data, err := os.ReadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		if err := yaml.Unmarshal(data, config); err != nil {
+			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 	}
 
-	// Set up environment variable support
-	v.SetEnvPrefix("NEVR")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
-	v.AutomaticEnv()
-
-	// Unmarshal config from file and environment variables
-	if err := v.Unmarshal(config); err != nil {
-		return nil, fmt.Errorf("error unmarshaling config: %w", err)
-	}
+	// Override with environment variables
+	applyEnvOverrides(config)
 
 	return config, nil
+}
+
+// applyEnvOverrides applies environment variable overrides to config.
+// Supports both NEVR_ and EVR_ prefixes for backwards compatibility.
+func applyEnvOverrides(c *Config) {
+	// Helper to get env with fallback prefix
+	getEnv := func(key string) string {
+		if v := os.Getenv("NEVR_" + key); v != "" {
+			return v
+		}
+		return os.Getenv("EVR_" + key)
+	}
+
+	// Global
+	if v := getEnv("DEBUG"); v != "" {
+		c.Debug = v == "true" || v == "1"
+	}
+	if v := getEnv("LOG_LEVEL"); v != "" {
+		c.LogLevel = v
+	}
+	if v := getEnv("LOG_FILE"); v != "" {
+		c.LogFile = v
+	}
+
+	// Agent
+	if v := getEnv("AGENT_JWT_TOKEN"); v != "" {
+		c.Agent.JWTToken = v
+	}
+
+	// API Server
+	if v := getEnv("APISERVER_SERVER_ADDRESS"); v != "" {
+		c.APIServer.ServerAddress = v
+	}
+	if v := getEnv("APISERVER_MONGO_URI"); v != "" {
+		c.APIServer.MongoURI = v
+	}
+	if v := getEnv("APISERVER_JWT_SECRET"); v != "" {
+		c.APIServer.JWTSecret = v
+	}
+	if v := getEnv("APISERVER_CAPTURE_DIR"); v != "" {
+		c.APIServer.CaptureDir = v
+	}
+	if v := getEnv("APISERVER_CAPTURE_RETENTION"); v != "" {
+		c.APIServer.CaptureRetention = v
+	}
+	if v := getEnv("APISERVER_METRICS_ADDR"); v != "" {
+		c.APIServer.MetricsAddr = v
+	}
+	if v := getEnv("APISERVER_MAX_STREAM_HZ"); v != "" {
+		if hz, err := strconv.Atoi(v); err == nil {
+			c.APIServer.MaxStreamHz = hz
+		}
+	}
+	if v := getEnv("APISERVER_CORS_ORIGINS"); v != "" {
+		c.APIServer.CORSOrigins = v
+	}
+	if v := getEnv("APISERVER_NODE_ID"); v != "" {
+		c.APIServer.NodeID = v
+	}
+	// AMQP configuration
+	if v := getEnv("APISERVER_AMQP_ENABLED"); v != "" {
+		c.APIServer.AMQPEnabled = v == "true" || v == "1"
+	}
+	if v := getEnv("APISERVER_AMQP_URI"); v != "" {
+		c.APIServer.AMQPURI = v
+	}
+	if v := getEnv("APISERVER_AMQP_QUEUE_NAME"); v != "" {
+		c.APIServer.AMQPQueueName = v
+	}
 }
 
 // NewLogger creates a zap logger based on the configuration
@@ -230,9 +308,7 @@ func (c *Config) ValidateAPIServerConfig() error {
 	if c.APIServer.MongoURI == "" {
 		return fmt.Errorf("mongo URI must be specified")
 	}
-	if c.APIServer.JWTSecret == "" {
-		return fmt.Errorf("jwt secret must be specified")
-	}
+	// JWT secret is optional - if not set, authentication is disabled
 	return nil
 }
 
@@ -261,4 +337,61 @@ func (c *Config) ValidateReplayerConfig() error {
 		}
 	}
 	return nil
+}
+
+// ParseByteSize parses a size string with optional unit suffix (K, M, G, T) into bytes.
+// Examples: "1000", "1000K", "500M", "10G", "1T"
+// Units are case-insensitive and use powers of 1024 (KiB, MiB, GiB, TiB).
+// Returns an error if the format is invalid.
+func ParseByteSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	// Match number with optional decimal and unit suffix
+	re := regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([kKmMgGtT])?[iI]?[bB]?$`)
+	matches := re.FindStringSubmatch(s)
+	if matches == nil {
+		return 0, fmt.Errorf("invalid size format: %q (use format like 1000, 500K, 100M, 10G)", s)
+	}
+
+	value, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number in size: %q", s)
+	}
+
+	var multiplier int64 = 1
+	if len(matches) > 2 && matches[2] != "" {
+		switch strings.ToUpper(matches[2]) {
+		case "K":
+			multiplier = 1024
+		case "M":
+			multiplier = 1024 * 1024
+		case "G":
+			multiplier = 1024 * 1024 * 1024
+		case "T":
+			multiplier = 1024 * 1024 * 1024 * 1024
+		}
+	}
+
+	return int64(value * float64(multiplier)), nil
+}
+
+// FormatByteSize formats a byte size into a human-readable string with units.
+func FormatByteSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(bytes)/float64(div), "KMGT"[exp])
 }

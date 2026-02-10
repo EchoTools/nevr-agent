@@ -6,7 +6,6 @@ import (
 
 	"github.com/echotools/nevr-agent/v4/internal/config"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -15,6 +14,9 @@ var (
 	cfg        *config.Config
 	logger     *zap.Logger
 	configFile string
+	debugFlag  bool
+	logLevel   string
+	logFile    string
 )
 
 func main() {
@@ -32,15 +34,15 @@ serving recorded data.`,
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Override config with global flags
-			if viper.IsSet("debug") {
-				cfg.Debug = viper.GetBool("debug")
+			// Override config with CLI flags (highest priority)
+			if cmd.Flags().Changed("debug") {
+				cfg.Debug = debugFlag
 			}
-			if viper.IsSet("log-level") {
-				cfg.LogLevel = viper.GetString("log-level")
+			if cmd.Flags().Changed("log-level") {
+				cfg.LogLevel = logLevel
 			}
-			if viper.IsSet("log-file") {
-				cfg.LogFile = viper.GetString("log-file")
+			if cmd.Flags().Changed("log-file") {
+				cfg.LogFile = logFile
 			}
 
 			logger, err = cfg.NewLogger()
@@ -59,14 +61,9 @@ serving recorded data.`,
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "config file (default is ./agent.yaml)")
-	rootCmd.PersistentFlags().BoolP("debug", "d", false, "enable debug logging")
-	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().String("log-file", "", "log file path")
-
-	// Bind global flags to viper
-	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
-	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
-	viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
+	rootCmd.PersistentFlags().BoolVarP(&debugFlag, "debug", "d", false, "enable debug logging")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "log file path")
 
 	// Define command groups
 	mainGroup := &cobra.Group{
@@ -95,10 +92,6 @@ serving recorded data.`,
 	showCmd := newDumpEventsCommand()
 	showCmd.GroupID = "main"
 	rootCmd.AddCommand(showCmd)
-
-	pushCmd := newSendEventsCommand()
-	pushCmd.GroupID = "main"
-	rootCmd.AddCommand(pushCmd)
 
 	rootCmd.AddCommand(newVersionCheckCommand())
 

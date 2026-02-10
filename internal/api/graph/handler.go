@@ -116,25 +116,6 @@ func (r *Resolver) executeQuery(ctx context.Context, req GraphQLRequest) (map[st
 		}
 	}
 
-	// Check for storeSessionEvent mutation
-	if containsQuery(req.Query, "storeSessionEvent") {
-		inputRaw, ok := req.Variables["input"].(map[string]any)
-		if ok {
-			input := StoreSessionEventInput{
-				LobbySessionID: inputRaw["lobbySessionId"].(string),
-				FrameData:      inputRaw["frameData"].(map[string]any),
-			}
-			if userID, ok := inputRaw["userId"].(string); ok {
-				input.UserID = &userID
-			}
-			payload, err := r.StoreSessionEvent(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			result["storeSessionEvent"] = payload
-		}
-	}
-
 	return result, nil
 }
 

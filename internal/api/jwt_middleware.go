@@ -9,8 +9,15 @@ import (
 )
 
 // JWTMiddleware validates JWT tokens from the Authorization header
+// If jwtSecret is empty, authentication is skipped (optional mode)
 func JWTMiddleware(jwtSecret string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// If no JWT secret is configured, skip authentication
+		if jwtSecret == "" {
+			next(w, r)
+			return
+		}
+
 		// Extract token from Authorization header
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {

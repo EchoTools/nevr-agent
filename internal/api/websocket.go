@@ -46,14 +46,10 @@ func (s *Server) WebSocketStreamHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	defer conn.Close()
 
-	// Extract optional node and user ID from headers
-	node := r.Header.Get("X-Node-ID")
-	if node == "" {
-		node = "default-node"
-	}
+	// Extract optional user ID from headers (node is configured on the agent)
 	userID := r.Header.Get("X-User-ID")
 
-	s.logger.Info("WebSocket connection established", "remote_addr", r.RemoteAddr, "node", node, "user_id", userID)
+	s.logger.Info("WebSocket connection established", "remote_addr", r.RemoteAddr, "node", s.nodeID, "user_id", userID)
 
 	// Configure connection
 	conn.SetReadLimit(maxMessageSize)
@@ -83,7 +79,7 @@ func (s *Server) WebSocketStreamHandler(w http.ResponseWriter, r *http.Request) 
 	for {
 		select {
 		case message := <-messageChan:
-			if err := s.processWebSocketMessage(ctx, message, node, userID); err != nil {
+			if err := s.processWebSocketMessage(ctx, message, s.nodeID, userID); err != nil {
 				s.logger.Error("Failed to process message", "error", err)
 				// Send error back to client
 				if err := s.sendWebSocketError(conn, err); err != nil {
@@ -158,6 +154,9 @@ func (s *Server) processWebSocketMessage(ctx context.Context, message []byte, no
 		return nil
 	}
 
+	// Increment frame counter
+	s.frameCount.Add(1)
+
 	frame := msg.GetFrame()
 	lobbySessionID := frame.GetSession().GetSessionId()
 
@@ -173,6 +172,18 @@ func (s *Server) processWebSocketMessage(ctx context.Context, message []byte, no
 	// Store the frame to MongoDB
 	if err := StoreSessionFrame(ctx, s.mongoClient, lobbySessionID, userID, frame); err != nil {
 		return fmt.Errorf("failed to store session frame: %w", err)
+	}
+
+	// Write frame to capture file storage
+	if s.storageManager != nil {
+		if err := s.storageManager.WriteFrame(matchID.String(), frame); err != nil {
+			s.logger.Warn("Failed to write frame to capture storage", "error", err, "match_id", matchID.String())
+		}
+	}
+
+	// Broadcast frame to live stream subscribers
+	if s.streamHub != nil {
+		s.streamHub.BroadcastFrame(matchID.String(), frame)
 	}
 
 	// Publish to AMQP if publisher is available

@@ -18,7 +18,7 @@ import (
 	"reflect"
 
 	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-common/v4/gen/go/apigame"
+	apigamev1 "github.com/echotools/nevr-common/v4/gen/go/apigame/v1"
 	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -254,7 +254,7 @@ func parseLineToFrame(line []byte, unmarshaler *protojson.UnmarshalOptions) (*te
 	}
 
 	frame := &telemetry.LobbySessionStateFrame{
-		Session: &apigame.SessionResponse{},
+		Session: &apigamev1.SessionResponse{},
 	}
 
 	// Parse session JSON (second part)
@@ -270,7 +270,7 @@ func parseLineToFrame(line []byte, unmarshaler *protojson.UnmarshalOptions) (*te
 			bonesData = bonesData[1:]
 		}
 		if len(bonesData) > 0 {
-			frame.PlayerBones = &apigame.PlayerBonesResponse{}
+			frame.PlayerBones = &apigamev1.PlayerBonesResponse{}
 			if err := unmarshaler.Unmarshal(bonesData, frame.PlayerBones); err != nil {
 				return nil, fmt.Errorf("failed to parse bones JSON: %w", err)
 			}
