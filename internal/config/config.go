@@ -75,12 +75,16 @@ type APIServerConfig struct {
 
 // ConverterConfig holds configuration for the converter subcommand
 type ConverterConfig struct {
-	InputFile  string `yaml:"input_file"`
-	OutputFile string `yaml:"output_file"`
-	OutputDir  string `yaml:"output_dir"`
-	Format     string `yaml:"format"`
-	Verbose    bool   `yaml:"verbose"`
-	Overwrite  bool   `yaml:"overwrite"`
+	InputFile    string `yaml:"input_file"`
+	OutputFile   string `yaml:"output_file"`
+	OutputDir    string `yaml:"output_dir"`
+	Format       string `yaml:"format"`
+	Verbose      bool   `yaml:"verbose"`
+	Overwrite    bool   `yaml:"overwrite"`
+	ExcludeBones bool   `yaml:"exclude_bones"`
+	Recursive    bool   `yaml:"recursive"`
+	Glob         string `yaml:"glob"`
+	Validate     bool   `yaml:"validate"`
 }
 
 // ReplayerConfig holds configuration for the replayer subcommand
