@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-common/v4/gen/go/apigame"
+	apigamev1 "github.com/echotools/nevr-common/v4/gen/go/apigame/v1"
 	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -38,12 +38,12 @@ type ReplayServer struct {
 }
 
 type FrameResponse struct {
-	Timestamp      string                       `json:"timestamp"`
-	SessionData    *apigame.SessionResponse     `json:"session_data"`
-	PlayerBoneData *apigame.PlayerBonesResponse `json:"player_bone_data,omitempty"`
-	FrameNumber    int64                        `json:"frame_number"`
-	ElapsedTime    string                       `json:"elapsed_time"`
-	IsPlaying      bool                         `json:"is_playing"`
+	Timestamp      string                         `json:"timestamp"`
+	SessionData    *apigamev1.SessionResponse     `json:"session_data"`
+	PlayerBoneData *apigamev1.PlayerBonesResponse `json:"player_bone_data,omitempty"`
+	FrameNumber    int64                          `json:"frame_number"`
+	ElapsedTime    string                         `json:"elapsed_time"`
+	IsPlaying      bool                           `json:"is_playing"`
 }
 
 var (
@@ -327,7 +327,7 @@ func (rs *ReplayServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	rs.mu.RLock()
-	var frameData *apigame.SessionResponse
+	var frameData *apigamev1.SessionResponse
 	if rs.currentFrame != nil {
 		frameData = rs.currentFrame.GetSession()
 	}
@@ -356,7 +356,7 @@ func (rs *ReplayServer) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (rs *ReplayServer) handlePlayerBones(w http.ResponseWriter, r *http.Request) {
 	rs.mu.RLock()
-	var boneData *apigame.PlayerBonesResponse
+	var boneData *apigamev1.PlayerBonesResponse
 	if rs.currentFrame != nil {
 		boneData = rs.currentFrame.GetPlayerBones()
 	}
