@@ -41,6 +41,9 @@ type Config struct {
 	// Metrics
 	MetricsAddr string `json:"metrics_addr" yaml:"metrics_addr"`
 
+	// Node identifier for this agent instance
+	NodeID string `json:"node_id" yaml:"node_id"`
+
 	// Optional timeouts
 	MongoTimeout  time.Duration `json:"mongo_timeout" yaml:"mongo_timeout"`
 	ServerTimeout time.Duration `json:"server_timeout" yaml:"server_timeout"`
@@ -68,6 +71,16 @@ func DefaultConfig() *Config {
 
 	jwtSecret := os.Getenv("EVR_APISERVER_JWT_SECRET")
 
+	nodeID := os.Getenv("EVR_APISERVER_NODE_ID")
+	if nodeID == "" {
+		// Generate a default node ID from hostname
+		if hostname, err := os.Hostname(); err == nil {
+			nodeID = hostname
+		} else {
+			nodeID = "default-node"
+		}
+	}
+
 	return &Config{
 		MongoURI:         mongoURI,
 		DatabaseName:     sessionEventDatabaseName,
@@ -82,6 +95,7 @@ func DefaultConfig() *Config {
 		CaptureMaxSize:   10 * 1024 * 1024 * 1024, // 10GB
 		MaxStreamHz:      60,
 		MetricsAddr:      "",
+		NodeID:           nodeID,
 		MongoTimeout:     10 * time.Second,
 		ServerTimeout:    30 * time.Second,
 	}
@@ -101,9 +115,7 @@ func (c *Config) Validate() error {
 	if c.ServerAddress == "" {
 		return fmt.Errorf("server_address is required")
 	}
-	if c.JWTSecret == "" {
-		return fmt.Errorf("jwt_secret is required")
-	}
+	// JWT secret is optional - if not set, authentication is disabled
 	if c.AMQPEnabled && c.AMQPURI == "" {
 		return fmt.Errorf("amqp_uri is required when AMQP is enabled")
 	}
@@ -112,11 +124,12 @@ func (c *Config) Validate() error {
 
 // Service represents the complete session events service
 type Service struct {
-	config        *Config
-	mongoClient   *mongo.Client
-	server        *Server
-	amqpPublisher *amqp.Publisher
-	logger        Logger
+	config         *Config
+	mongoClient    *mongo.Client
+	server         *Server
+	amqpPublisher  *amqp.Publisher
+	storageManager *StorageManager
+	logger         Logger
 }
 
 // NewService creates a new session events service
@@ -171,8 +184,23 @@ func (s *Service) Initialize(ctx context.Context) error {
 		s.logger.Info("AMQP publisher initialized", "queue", s.config.AMQPQueueName)
 	}
 
-	// Create HTTP server
-	s.server = NewServer(s.mongoClient, s.logger, s.config.JWTSecret)
+	// Initialize storage manager if capture directory is configured
+	if s.config.CaptureDir != "" {
+		retention, err := time.ParseDuration(s.config.CaptureRetention)
+		if err != nil {
+			retention = 168 * time.Hour // Default 7 days
+		}
+
+		sm, err := NewStorageManager(s.config.CaptureDir, retention, s.config.CaptureMaxSize, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create storage manager: %w", err)
+		}
+		s.storageManager = sm
+		s.logger.Info("Storage manager initialized", "capture_dir", s.config.CaptureDir)
+	}
+
+	// Create HTTP server with storage manager
+	s.server = NewServerWithStorage(s.mongoClient, s.logger, s.config.JWTSecret, s.storageManager, s.config.MaxStreamHz, s.config.NodeID)
 
 	// Set the AMQP publisher on the server if available
 	if s.amqpPublisher != nil {

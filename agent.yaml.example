@@ -1,7 +1,7 @@
-# EVR Telemetry Configuration File
+# NEVR Agent Configuration File
 # This file can be used to configure the agent application
 # Command-line flags will override values in this file
-# Environment variables with the EVR_ prefix will also override config values
+# Environment variables with the NEVR_ prefix will override config values
 
 # Global configuration
 debug: false
@@ -49,10 +49,18 @@ apiserver:
   jwt_secret: "your-secret-key-here-change-this-in-production"
   max_stream_hz: 60
   
+  # AMQP/RabbitMQ configuration (for publishing match events)
+  amqp_enabled: false
+  amqp_uri: "amqp://guest:guest@localhost:5672/"
+  amqp_queue_name: "match.events"
+  
   # Capture storage configuration
   capture_dir: "./captures"
   capture_retention: "168h"      # 7 days
   capture_max_size: 10737418240  # 10GB in bytes
+  
+  # CORS configuration
+  cors_origins: "*"             # Comma-separated list of allowed origins
   
   # Metrics configuration (leave empty to disable)
   metrics_addr: ""              # e.g., ":9090" to enable Prometheus metrics

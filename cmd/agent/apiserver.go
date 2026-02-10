@@ -8,8 +8,8 @@ import (
 	"syscall"
 
 	"github.com/echotools/nevr-agent/v4/internal/api"
+	"github.com/echotools/nevr-agent/v4/internal/config"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +33,18 @@ func (z *zapLoggerAdapter) Error(msg string, fields ...any) {
 func (z *zapLoggerAdapter) Warn(msg string, fields ...any) {
 	z.logger.Sugar().Warnw(msg, fields...)
 }
+
+var (
+	serverAddress    string
+	mongoURI         string
+	jwtSecret        string
+	captureDir       string
+	captureRetention string
+	captureMaxSize   string
+	maxStreamHz      int
+	metricsAddr      string
+	nodeID           string
+)
 
 func newAPIServerCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -59,37 +71,60 @@ and real-time streaming support.`,
 	}
 
 	// APIServer-specific flags
-	cmd.Flags().String("server-address", ":8081", "Server listen address")
-	cmd.Flags().String("mongo-uri", "mongodb://localhost:27017", "MongoDB connection URI")
-	cmd.Flags().String("jwt-secret", "", "JWT secret key for token validation")
+	cmd.Flags().StringVar(&serverAddress, "server-address", ":8081", "Server listen address")
+	cmd.Flags().StringVar(&mongoURI, "mongo-uri", "", "MongoDB connection URI")
+	cmd.Flags().StringVar(&jwtSecret, "jwt-secret", "", "JWT secret key for token validation")
 
 	// Capture storage flags
-	cmd.Flags().String("capture-dir", "./captures", "Directory to store nevrcap capture files")
-	cmd.Flags().String("capture-retention", "168h", "How long to keep capture files (e.g., 24h, 7d)")
-	cmd.Flags().Int64("capture-max-size", 10*1024*1024*1024, "Maximum storage for captures in bytes")
+	cmd.Flags().StringVar(&captureDir, "capture-dir", "", "Directory to store nevrcap capture files")
+	cmd.Flags().StringVar(&captureRetention, "capture-retention", "168h", "How long to keep capture files (e.g., 24h, 7d)")
+	cmd.Flags().StringVar(&captureMaxSize, "capture-max-size", "10G", "Maximum storage for captures (e.g., 500M, 10G, 1T)")
 
 	// Rate limiting
-	cmd.Flags().Int("max-stream-hz", 60, "Maximum frames per second to accept from clients")
+	cmd.Flags().IntVar(&maxStreamHz, "max-stream-hz", 0, "Maximum frames per second to accept from clients")
 
 	// Metrics
-	cmd.Flags().String("metrics-addr", "", "Prometheus metrics endpoint address (e.g., :9090)")
+	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Prometheus metrics endpoint address (e.g., :9090)")
 
-	// Bind flags to viper
-	viper.BindPFlags(cmd.Flags())
+	// Node identifier
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Unique identifier for this agent node (defaults to hostname)")
 
 	return cmd
 }
 
 func runAPIServer(cmd *cobra.Command, args []string) error {
-	// Override config with command flags
-	cfg.APIServer.ServerAddress = viper.GetString("server-address")
-	cfg.APIServer.MongoURI = viper.GetString("mongo-uri")
-	cfg.APIServer.JWTSecret = viper.GetString("jwt-secret")
-	cfg.APIServer.CaptureDir = viper.GetString("capture-dir")
-	cfg.APIServer.CaptureRetention = viper.GetString("capture-retention")
-	cfg.APIServer.CaptureMaxSize = viper.GetInt64("capture-max-size")
-	cfg.APIServer.MaxStreamHz = viper.GetInt("max-stream-hz")
-	cfg.APIServer.MetricsAddr = viper.GetString("metrics-addr")
+	// Override config with CLI flags (highest priority)
+	if cmd.Flags().Changed("server-address") {
+		cfg.APIServer.ServerAddress = serverAddress
+	}
+	if cmd.Flags().Changed("mongo-uri") {
+		cfg.APIServer.MongoURI = mongoURI
+	}
+	if cmd.Flags().Changed("jwt-secret") {
+		cfg.APIServer.JWTSecret = jwtSecret
+	}
+	if cmd.Flags().Changed("capture-dir") {
+		cfg.APIServer.CaptureDir = captureDir
+	}
+	if cmd.Flags().Changed("capture-retention") {
+		cfg.APIServer.CaptureRetention = captureRetention
+	}
+	if cmd.Flags().Changed("capture-max-size") {
+		parsedSize, err := config.ParseByteSize(captureMaxSize)
+		if err != nil {
+			return fmt.Errorf("invalid capture-max-size: %w", err)
+		}
+		cfg.APIServer.CaptureMaxSize = parsedSize
+	}
+	if cmd.Flags().Changed("max-stream-hz") {
+		cfg.APIServer.MaxStreamHz = maxStreamHz
+	}
+	if cmd.Flags().Changed("metrics-addr") {
+		cfg.APIServer.MetricsAddr = metricsAddr
+	}
+	if cmd.Flags().Changed("node-id") {
+		cfg.APIServer.NodeID = nodeID
+	}
 
 	// Validate configuration
 	if err := cfg.ValidateAPIServerConfig(); err != nil {
@@ -103,7 +138,8 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 		zap.String("capture_retention", cfg.APIServer.CaptureRetention),
 		zap.Int64("capture_max_size", cfg.APIServer.CaptureMaxSize),
 		zap.Int("max_stream_hz", cfg.APIServer.MaxStreamHz),
-		zap.String("metrics_addr", cfg.APIServer.MetricsAddr))
+		zap.String("metrics_addr", cfg.APIServer.MetricsAddr),
+		zap.String("node_id", cfg.APIServer.NodeID))
 
 	// Create service configuration
 	serviceConfig := api.DefaultConfig()
@@ -115,6 +151,7 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 	serviceConfig.CaptureMaxSize = cfg.APIServer.CaptureMaxSize
 	serviceConfig.MaxStreamHz = cfg.APIServer.MaxStreamHz
 	serviceConfig.MetricsAddr = cfg.APIServer.MetricsAddr
+	serviceConfig.NodeID = cfg.APIServer.NodeID
 
 	// Create service
 	service, err := api.NewService(serviceConfig, &zapLoggerAdapter{logger: logger})
@@ -146,9 +183,8 @@ func runAPIServer(cmd *cobra.Command, args []string) error {
 	logger.Info("Starting session events service",
 		zap.String("address", cfg.APIServer.ServerAddress))
 	logger.Info("Available endpoints:",
-		zap.String("POST", "/lobby-session-events - Store session event"),
+		zap.String("WebSocket", "/v3/stream - WebSocket stream with JWT auth (receive events)"),
 		zap.String("GET", "/lobby-session-events/{match_id} - Get session events by match ID"),
-		zap.String("WebSocket", "/v3/stream - WebSocket stream with JWT auth"),
 		zap.String("GET", "/health - Health check"))
 
 	if err := service.Start(ctx); err != nil {

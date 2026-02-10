@@ -7,12 +7,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/echotools/nevr-agent/v4/internal/amqp"
 	"github.com/echotools/nevr-agent/v4/internal/api/graph"
-	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
-	"github.com/gofrs/uuid/v5"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -35,6 +34,11 @@ type Server struct {
 	corsHandler     *cors.Cors
 	amqpPublisher   *amqp.Publisher
 	jwtSecret       string
+	nodeID          string
+	frameCount      atomic.Int64
+	streamHub       *StreamHub
+	storageManager  *StorageManager
+	matchRetrieval  *MatchRetrievalHandler
 }
 
 // Logger interface for abstracting logging
@@ -71,8 +75,23 @@ func (s *Server) SetAMQPPublisher(publisher *amqp.Publisher) {
 
 // NewServer creates a new session events HTTP server
 func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Server {
+	return NewServerWithStorage(mongoClient, logger, jwtSecret, nil, 60, "")
+}
+
+// NewServerWithStorage creates a new session events HTTP server with storage support
+func NewServerWithStorage(mongoClient *mongo.Client, logger Logger, jwtSecret string, storage *StorageManager, maxFrameRate int, nodeID string) *Server {
 	if logger == nil {
 		logger = &DefaultLogger{}
+	}
+	if maxFrameRate <= 0 {
+		maxFrameRate = 60
+	}
+	if nodeID == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			nodeID = hostname
+		} else {
+			nodeID = "default-node"
+		}
 	}
 
 	router := mux.NewRouter()
@@ -85,6 +104,14 @@ func NewServer(mongoClient *mongo.Client, logger Logger, jwtSecret string) *Serv
 		graphqlResolver: graph.NewResolver(mongoClient),
 		corsHandler:     createCORSHandler(),
 		jwtSecret:       jwtSecret,
+		nodeID:          nodeID,
+		storageManager:  storage,
+		streamHub:       NewStreamHub(storage, logger, nil, maxFrameRate, nil),
+	}
+
+	// Create match retrieval handler if storage is available
+	if storage != nil {
+		s.matchRetrieval = NewMatchRetrievalHandler(storage, logger, "")
 	}
 
 	s.setupRoutes()
@@ -127,12 +154,10 @@ func (s *Server) setupRoutes() {
 	// ============================================
 	v1 := s.router.PathPrefix("/v1").Subrouter()
 	v1.Use(s.corsOptionsMiddleware)
-	v1.HandleFunc("/lobby-session-events", s.storeSessionEventHandler).Methods("POST")
 	v1.HandleFunc("/lobby-session-events/{lobby_session_id}", s.getSessionEventsHandlerV1).Methods("GET")
 
 	// Legacy routes without version prefix (deprecated, redirects to v1)
 	s.router.Use(s.corsOptionsMiddleware)
-	s.router.HandleFunc("/lobby-session-events", s.storeSessionEventHandler).Methods("POST")
 	s.router.HandleFunc("/lobby-session-events/{lobby_session_id}", s.getSessionEventsHandlerV1).Methods("GET")
 
 	// ============================================
@@ -148,12 +173,22 @@ func (s *Server) setupRoutes() {
 	// GraphQL Playground (development tool)
 	v3.Handle("/playground", graph.PlaygroundHandler("/v3/query")).Methods("GET")
 
-	// v3 REST endpoints (optional, for those who prefer REST over GraphQL)
-	v3.HandleFunc("/lobby-session-events", s.storeSessionEventHandlerV3).Methods("POST")
+	// v3 REST endpoints - GET only (events are received via WebSocket)
 	v3.HandleFunc("/lobby-session-events/{lobby_session_id}", s.getSessionEventsHandlerV3).Methods("GET")
 
-	// WebSocket stream endpoint with JWT authentication
+	// WebSocket stream endpoint with JWT authentication (primary way to receive events)
 	v3.HandleFunc("/stream", JWTMiddleware(s.jwtSecret, s.WebSocketStreamHandler)).Methods("GET")
+
+	// Shorter WebSocket endpoint alias
+	s.router.HandleFunc("/ws", JWTMiddleware(s.jwtSecret, s.WebSocketStreamHandler)).Methods("GET")
+
+	// Register StreamHub routes for match streaming
+	s.streamHub.RegisterRoutes(s.router)
+
+	// Register match retrieval routes if storage is available
+	if s.matchRetrieval != nil {
+		s.matchRetrieval.RegisterRoutes(s.router)
+	}
 
 	// Add a NotFoundHandler for debugging unmatched routes
 	s.router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,89 +215,6 @@ func (s *Server) corsOptionsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// storeSessionEventHandler handles POST requests to store session events
-func (s *Server) storeSessionEventHandler(w http.ResponseWriter, r *http.Request) {
-	// Log incoming request for debugging
-	s.logger.Debug("Received request",
-		"method", r.Method,
-		"path", r.URL.Path,
-		"content_type", r.Header.Get("Content-Type"))
-
-	ctx := r.Context()
-
-	var payload json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		s.logger.Error("Failed to decode request body", "error", err)
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
-		return
-	}
-
-	// Parse the payload as LobbySessionStateFrame
-	msg := &telemetry.LobbySessionStateFrame{}
-	if err := protojson.Unmarshal(payload, msg); err != nil {
-		s.logger.Error("Failed to unmarshal protobuf payload", "error", err)
-		http.Error(w, "Invalid protobuf payload", http.StatusBadRequest)
-		return
-	}
-
-	// Extract node from request headers or use a default value
-	node := r.Header.Get("X-Node-ID")
-	if node == "" {
-		node = "default-node" // You might want to configure this
-	}
-
-	// Extract user ID from request headers
-	userID := r.Header.Get("X-User-ID")
-
-	lobbySessionID := msg.GetSession().GetSessionId()
-	matchID := MatchID{
-		UUID: uuid.FromStringOrNil(lobbySessionID),
-		Node: node,
-	}
-
-	if !matchID.IsValid() {
-		s.logger.Error("Invalid match ID", "lobby_session_id", lobbySessionID, "node", node)
-		http.Error(w, "Invalid match ID in payload", http.StatusBadRequest)
-		return
-	}
-
-	// Store the frame to MongoDB
-	if err := StoreSessionFrame(ctx, s.mongoClient, lobbySessionID, userID, msg); err != nil {
-		s.logger.Error("Failed to store session frame", "error", err, "lobby_session_id", lobbySessionID)
-		http.Error(w, "Failed to store session frame", http.StatusInternalServerError)
-		return
-	}
-
-	// Publish to AMQP if publisher is available
-	if s.amqpPublisher != nil && s.amqpPublisher.IsConnected() {
-		amqpEvent := &amqp.MatchEvent{
-			Type:           "session.frame",
-			LobbySessionID: lobbySessionID,
-			UserID:         userID,
-			Timestamp:      msg.Timestamp.AsTime(),
-		}
-		if err := s.amqpPublisher.Publish(ctx, amqpEvent); err != nil {
-			// Log error but don't fail the request - AMQP is best-effort
-			s.logger.Warn("Failed to publish AMQP event", "error", err, "lobby_session_id", lobbySessionID)
-		}
-	}
-
-	// Return success response
-	response := map[string]any{
-		"success":          true,
-		"lobby_session_id": lobbySessionID,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode response", "error", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
-	}
-
-	s.logger.Debug("Stored session frame", "session_uuid", lobbySessionID)
 }
 
 // getSessionEventsHandlerV1 handles GET requests to retrieve session events (v1 legacy format)
@@ -358,12 +310,6 @@ func (s *Server) getSessionEventsHandlerV3(w http.ResponseWriter, r *http.Reques
 	s.logger.Debug("Retrieved session frames (v3)", "lobby_session_id", sessionID, "count", len(frames))
 }
 
-// storeSessionEventHandlerV3 handles POST requests to store session events (v3 format)
-func (s *Server) storeSessionEventHandlerV3(w http.ResponseWriter, r *http.Request) {
-	// v3 uses the same storage logic but returns more detailed response
-	s.storeSessionEventHandler(w, r)
-}
-
 // healthHandler handles health check requests
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -417,6 +363,9 @@ func (s *Server) StartWithContext(ctx context.Context, address string) error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Start frame counter logging goroutine
+	go s.logFrameStats(ctx)
+
 	// Start server in a goroutine
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -438,6 +387,25 @@ func (s *Server) StartWithContext(ctx context.Context, address string) error {
 
 	s.logger.Info("Server shutdown completed")
 	return nil
+}
+
+// logFrameStats periodically logs frame statistics
+func (s *Server) logFrameStats(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastCount int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentCount := s.frameCount.Load()
+			framesSinceLastLog := currentCount - lastCount
+			s.logger.Debug("Frame statistics", "total_frames", currentCount, "frames_last_5s", framesSinceLastLog)
+			lastCount = currentCount
+		}
+	}
 }
 
 type SessionResponse struct {
