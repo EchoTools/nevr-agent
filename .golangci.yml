@@ -1,0 +1,35 @@
+version: "2"
+run:
+  timeout: 5m
+  tests: false
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+  settings:
+    errcheck:
+      check-blank: true
+    govet:
+      enable-all: true
+    gosec:
+      excludes:
+        - G104
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+formatters:
+  enable:
+    - gofmt
+issues:
+  new-from-rev: HEAD~1
+  max-issues-per-linter: 0
+  max-same-issues: 0
+output:
+  formats:
+    text: {}
