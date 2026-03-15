@@ -77,10 +77,6 @@ serving recorded data.`,
 	streamCmd.GroupID = "main"
 	rootCmd.AddCommand(streamCmd)
 
-	serveCmd := newAPIServerCommand()
-	serveCmd.GroupID = "main"
-	rootCmd.AddCommand(serveCmd)
-
 	convertCmd := newConverterCommand()
 	convertCmd.GroupID = "main"
 	rootCmd.AddCommand(convertCmd)
