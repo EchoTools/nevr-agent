@@ -50,7 +50,7 @@ scripts/            Platform-specific helper scripts
 - **CLI framework**: cobra (`spf13/cobra`). Each subcommand is a file in `cmd/agent/`.
 - **Logging**: `go.uber.org/zap` structured logger.
 - **Config**: YAML config files loaded via `internal/config`. See `agent.yaml.example`.
-- **Protobuf types**: Imported from `github.com/echotools/nevr-capture/v3` and `nevr-common/v4`. No `.proto` files live in this repo.
+- **Protobuf types**: Imported from `github.com/echotools/nevr-capture/v3` and `nevr-proto/v4`. No `.proto` files live in this repo.
 - **Error handling**: Return errors up; don't panic. Use `fmt.Errorf` with `%w` for wrapping.
 - **Naming**: Standard Go conventions. Package names are single lowercase words.
 - **Build tags**: None required. `CGO_ENABLED=0` for all builds.
@@ -63,7 +63,7 @@ Key external dependencies:
 | Package | Purpose |
 |---|---|
 | `nevr-capture/v3` | Protobuf capture format types and serialization |
-| `nevr-common/v4` | Shared platform types and utilities |
+| `nevr-proto/v4` | Shared platform types and utilities |
 | `spf13/cobra` | CLI framework |
 | `gorilla/websocket` | WebSocket output for live streaming |
 | `go.uber.org/zap` | Structured logging |
