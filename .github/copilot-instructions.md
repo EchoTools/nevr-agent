@@ -15,7 +15,7 @@ internal/amqp/       # RabbitMQ integration
 ```
 
 **Cross-repo dependencies** (via go.work):
-- `nevr-common` → Protobuf definitions (`telemetry.LobbySessionStateFrame`)
+- `nevr-proto` → Protobuf definitions (`telemetry.LobbySessionStateFrame`)
 - `nevrcap` → Codec implementations (.echoreplay, .nevrcap formats)
 
 ## Key Patterns
