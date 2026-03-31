@@ -103,15 +103,7 @@ func runConverter(cmd *cobra.Command, args []string) error {
 	cfg.Converter.Glob = convGlob
 	cfg.Converter.Validate = convValidate
 
-	if cfg.Converter.Validate && cfg.Converter.ExcludeBones {
-		return fmt.Errorf("--validate cannot be used with --exclude-bones (would cause validation to fail)")
-	}
-
-	if cfg.Converter.OutputFile != "" && (cfg.Converter.Recursive || cfg.Converter.Glob != "") {
-		return fmt.Errorf("--output cannot be used with --recursive or --glob (output files will be auto-generated)")
-	}
-
-	// Validate configuration
+	// Validate configuration (all validation moved to config layer)
 	if err := cfg.ValidateConverterConfig(); err != nil {
 		return err
 	}
