@@ -6,8 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -46,7 +45,7 @@ func NewNevrCapLogSession(ctx context.Context, logger *zap.Logger, filePath stri
 
 func (n *NevrCapLogSession) ProcessFrames() error {
 	// Create a new nevrcap writer
-	writer, err := codecs.NewNevrCapWriter(n.filePath)
+	writer, err := NewLegacyWriter(n.filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create nevrcap writer: %w", err)
 	}

@@ -17,9 +17,9 @@ import (
 	"path/filepath"
 	"reflect"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	apigamev1 "github.com/echotools/nevr-common/v4/gen/go/apigame/v1"
-	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	"github.com/echotools/tape/pkg/codec"
+	apigamev1 "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/engine/v1"
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -42,7 +42,7 @@ func main() {
 func validateEchoReplayFile(filename string) error {
 	// Try to open as zip first, fall back to uncompressed
 	var manualReader io.ReadCloser
-	var codec *codecs.EchoReplay
+	var replayReader *codec.EchoReplay
 	var err error
 
 	zipReader, zipErr := zip.OpenReader(filename)
@@ -81,11 +81,11 @@ func validateEchoReplayFile(filename string) error {
 		defer manualReader.Close()
 
 		// Use the codec
-		codec, err = codecs.NewEchoReplayReader(filename)
+		replayReader, err = codec.NewEchoReplayReader(filename)
 		if err != nil {
 			return fmt.Errorf("failed to create codec reader: %w", err)
 		}
-		defer codec.Close()
+		defer replayReader.Close()
 	} else {
 		// Not a zip file, try uncompressed
 		file, err := os.Open(filename)
@@ -134,9 +134,9 @@ func validateEchoReplayFile(filename string) error {
 
 		// Step 2: Parse JSON into protobuf and re-encode
 		var frame *telemetry.LobbySessionStateFrame
-		if codec != nil {
+		if replayReader != nil {
 			// Use codec for zip files
-			frame, err = codec.ReadFrame()
+			frame, err = replayReader.ReadFrame()
 			if err != nil {
 				if err == io.EOF {
 					return fmt.Errorf("codec returned EOF at line %d, but manual parser found data", lineNum)
@@ -299,7 +299,7 @@ func reEncodeWithCodec(frame *telemetry.LobbySessionStateFrame) (session map[str
 		return nil, nil, fmt.Errorf("failed to marshal session: %w", err)
 	}
 	// Apply the same fix as the codec
-	sessionBytes = codecs.FixProtojsonUint64Encoding(sessionBytes)
+	sessionBytes = codec.FixProtojsonUint64Encoding(sessionBytes)
 	session = make(map[string]any)
 	if err := json.Unmarshal(sessionBytes, &session); err != nil {
 		return nil, nil, fmt.Errorf("failed to unmarshal session: %w", err)
@@ -313,7 +313,7 @@ func reEncodeWithCodec(frame *telemetry.LobbySessionStateFrame) (session map[str
 			return nil, nil, fmt.Errorf("failed to marshal bones: %w", err)
 		}
 		// Apply the same fix as the codec
-		bonesBytes = codecs.FixProtojsonUint64Encoding(bonesBytes)
+		bonesBytes = codec.FixProtojsonUint64Encoding(bonesBytes)
 		if err := json.Unmarshal(bonesBytes, &bones); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal bones: %w", err)
 		}

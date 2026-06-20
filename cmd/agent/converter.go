@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-capture/v3/pkg/conversion"
+	"github.com/echotools/nevr-agent/v4/internal/agent"
+	"github.com/echotools/tape/pkg/codec"
+	"github.com/echotools/tape/pkg/conversion"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -249,7 +250,7 @@ func convertFile(inputFile, outputFile string, showProgress bool) (*ConversionSt
 				return nil, err
 			}
 		} else {
-			if err := conversion.ConvertEchoReplayToNevrcap(inputFile, outputFile); err != nil {
+			if err := convertEchoReplayToNevrcap(inputFile, outputFile); err != nil {
 				return nil, err
 			}
 		}
@@ -286,15 +287,46 @@ func convertFile(inputFile, outputFile string, showProgress bool) (*ConversionSt
 	return stats, nil
 }
 
-// convertEchoReplayToNevrcapWithProgress converts with optional progress bar
-func convertEchoReplayToNevrcapWithProgress(inputFile, outputFile string) error {
-	reader, err := codecs.NewEchoReplayReader(inputFile)
+// convertEchoReplayToNevrcap converts an .echoreplay file to .nevrcap format.
+func convertEchoReplayToNevrcap(inputFile, outputFile string) error {
+	reader, err := codec.NewEchoReplayReader(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to open input file: %w", err)
 	}
 	defer reader.Close()
 
-	writer, err := codecs.NewNevrCapWriter(outputFile)
+	writer, err := agent.NewLegacyWriter(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer writer.Close()
+
+	for {
+		frame, err := reader.ReadFrame()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read frame: %w", err)
+		}
+
+		if err := writer.WriteFrame(frame); err != nil {
+			return fmt.Errorf("failed to write frame: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// convertEchoReplayToNevrcapWithProgress converts with optional progress bar
+func convertEchoReplayToNevrcapWithProgress(inputFile, outputFile string) error {
+	reader, err := codec.NewEchoReplayReader(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer reader.Close()
+
+	writer, err := agent.NewLegacyWriter(outputFile)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
@@ -304,7 +336,7 @@ func convertEchoReplayToNevrcapWithProgress(inputFile, outputFile string) error 
 	totalFrames := 0
 	var bar *progressbar.ProgressBar
 	if convShowProgress {
-		countReader, err := codecs.NewEchoReplayReader(inputFile)
+		countReader, err := codec.NewEchoReplayReader(inputFile)
 		if err == nil {
 			for {
 				if _, err := countReader.ReadFrame(); err != nil {
@@ -363,7 +395,7 @@ func convertEchoReplayToNevrcapWithProgress(inputFile, outputFile string) error 
 
 // convertNevrcapToEchoReplayWithProgress converts with optional progress bar
 func convertNevrcapToEchoReplayWithProgress(inputFile, outputFile string) error {
-	reader, err := codecs.NewNevrCapReader(inputFile)
+	reader, err := codec.NewLegacyReader(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to open input file: %w", err)
 	}
@@ -374,7 +406,7 @@ func convertNevrcapToEchoReplayWithProgress(inputFile, outputFile string) error 
 		return fmt.Errorf("failed to read header: %w", err)
 	}
 
-	writer, err := codecs.NewEchoReplayWriter(outputFile)
+	writer, err := codec.NewEchoReplayWriter(outputFile)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
@@ -384,7 +416,7 @@ func convertNevrcapToEchoReplayWithProgress(inputFile, outputFile string) error 
 	totalFrames := 0
 	var bar *progressbar.ProgressBar
 	if convShowProgress {
-		countReader, err := codecs.NewNevrCapReader(inputFile)
+		countReader, err := codec.NewLegacyReader(inputFile)
 		if err == nil {
 			if _, err := countReader.ReadHeader(); err == nil {
 				for {
@@ -493,13 +525,13 @@ func convertSameFormat(inputFile, outputFile, format string) (*ConversionStats, 
 
 	switch format {
 	case "echoreplay":
-		reader, err := codecs.NewEchoReplayReader(inputFile)
+		reader, err := codec.NewEchoReplayReader(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open input file: %w", err)
 		}
 		defer reader.Close()
 
-		writer, err := codecs.NewEchoReplayWriter(outputFile)
+		writer, err := codec.NewEchoReplayWriter(outputFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create output file: %w", err)
 		}
@@ -526,7 +558,7 @@ func convertSameFormat(inputFile, outputFile, format string) (*ConversionStats, 
 		}
 
 	case "nevrcap":
-		reader, err := codecs.NewNevrCapReader(inputFile)
+		reader, err := codec.NewLegacyReader(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open input file: %w", err)
 		}
@@ -537,7 +569,7 @@ func convertSameFormat(inputFile, outputFile, format string) (*ConversionStats, 
 			return nil, fmt.Errorf("failed to read header: %w", err)
 		}
 
-		writer, err := codecs.NewNevrCapWriter(outputFile)
+		writer, err := agent.NewLegacyWriter(outputFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create output file: %w", err)
 		}
@@ -580,7 +612,7 @@ func countFrames(filename string) (int, error) {
 
 	switch format {
 	case "echoreplay":
-		reader, err := codecs.NewEchoReplayReader(filename)
+		reader, err := codec.NewEchoReplayReader(filename)
 		if err != nil {
 			return 0, err
 		}
@@ -599,7 +631,7 @@ func countFrames(filename string) (int, error) {
 		return count, nil
 
 	case "nevrcap":
-		reader, err := codecs.NewNevrCapReader(filename)
+		reader, err := codec.NewLegacyReader(filename)
 		if err != nil {
 			return 0, err
 		}
@@ -745,7 +777,7 @@ func validateRoundTrip(inputFile string) error {
 	tempEchoreplay := filepath.Join(tempDir, "temp.echoreplay")
 
 	logger.Info("Converting to nevrcap", zap.String("temp", tempNevrcap))
-	if err := conversion.ConvertEchoReplayToNevrcap(inputFile, tempNevrcap); err != nil {
+	if err := convertEchoReplayToNevrcap(inputFile, tempNevrcap); err != nil {
 		return fmt.Errorf("failed to convert to nevrcap: %w", err)
 	}
 

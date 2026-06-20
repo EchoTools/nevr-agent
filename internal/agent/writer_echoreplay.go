@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	"github.com/echotools/tape/pkg/codec"
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"go.uber.org/zap"
 )
 
@@ -100,7 +100,7 @@ func (fw *FrameDataLogSession) ProcessFrames() error {
 
 	byteCount := 0
 
-	writer, err := codecs.NewEchoReplayWriter(fw.filePath)
+	writer, err := codec.NewEchoReplayWriter(fw.filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create EchoReplayCodecWriter: %w", err)
 	}

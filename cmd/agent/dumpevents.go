@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	"github.com/echotools/nevr-capture/v3/pkg/processing"
-	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	"github.com/echotools/tape/pkg/codec"
+	"github.com/echotools/tape/pkg/processing"
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"github.com/klauspost/compress/zstd"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
@@ -97,11 +97,11 @@ func processReplayFile(filename, outputFormat string) error {
 	case strings.HasSuffix(lowerFilename, ".echoreplay.uncompressed"):
 		reader, err = newUncompressedEchoReplayReader(filename)
 	case strings.HasSuffix(lowerFilename, ".echoreplay"):
-		reader, err = codecs.NewEchoReplayReader(filename)
+		reader, err = codec.NewEchoReplayReader(filename)
 	case strings.HasSuffix(lowerFilename, ".nevrcap.uncompressed"):
 		reader, err = newUncompressedNevrCapReader(filename)
 	case strings.HasSuffix(lowerFilename, ".nevrcap"):
-		reader, err = codecs.NewNevrCapReader(filename)
+		reader, err = codec.NewLegacyReader(filename)
 	default:
 		return fmt.Errorf("unsupported file format: %s", filename)
 	}
@@ -401,7 +401,7 @@ func getEventTypeName(event *telemetry.LobbySessionEvent) string {
 type uncompressedEchoReplayReader struct {
 	file    *os.File
 	scanner *bufio.Scanner
-	codec   *codecs.EchoReplay
+	codec   *codec.EchoReplay
 }
 
 func newUncompressedEchoReplayReader(filename string) (*uncompressedEchoReplayReader, error) {

@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/nevr-capture/v3/pkg/codecs"
-	apigamev1 "github.com/echotools/nevr-common/v4/gen/go/apigame/v1"
-	telemetry "github.com/echotools/nevr-common/v4/gen/go/telemetry/v1"
+	"github.com/echotools/tape/pkg/codec"
+	apigamev1 "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/engine/v1"
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -175,7 +175,7 @@ func (rs *ReplayServer) playFile(filename string) error {
 }
 
 func (rs *ReplayServer) playEchoReplayFile(filename string) error {
-	reader, err := codecs.NewEchoReplayReader(filename)
+	reader, err := codec.NewEchoReplayReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open echo replay file: %w", err)
 	}
