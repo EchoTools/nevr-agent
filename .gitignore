@@ -42,4 +42,10 @@ bin/
 
 # local configuration
 /local.yml
-/agent.local.yml
+/agent.local.yml.serena/
+.sisyphus/
+*.nevrcap
+*.echoreplay
+*.zip
+progress.*
+captures/
