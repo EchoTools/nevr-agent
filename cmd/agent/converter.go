@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,38 +39,39 @@ var (
 func newConverterCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "convert",
-		Short: "Convert between .echoreplay and .nevrcap file formats",
-		Long: `The convert command converts replay files between the .echoreplay 
-(zip format) and .nevrcap (zstd compressed) formats.`,
-		Example: `  # Convert echoreplay to nevrcap
-	  agent convert --input game.echoreplay
+		Short: "Convert replay files to .tape format",
+		Long: `The convert command converts replay files to the .tape v2 format.
+Supports .echoreplay (zip) and .nevrcap (zstd) as input formats.
+Auto mode converts to .tape by default.`,
+		Example: `  # Convert echoreplay to tape (default)
+  agent convert --input game.echoreplay
 
-  # Convert nevrcap to echoreplay
-	  agent convert --input game.nevrcap
+  # Convert nevrcap to tape
+  agent convert --input game.nevrcap
 
   # Force specific output format
-	  agent convert --input game.echoreplay --format nevrcap
+  agent convert --input game.echoreplay --format tape
 
   # Specify output file
-	  agent convert --input game.nevrcap --output converted.echoreplay
-	  
+  agent convert --input game.nevrcap --output converted.tape
+
   # Show progress bar during conversion
-	  agent convert --input game.echoreplay --progress
-	  
+  agent convert --input game.echoreplay --progress
+
   # Exclude player bone data from output
-	  agent convert --input game.echoreplay --exclude-bones
+  agent convert --input game.echoreplay --exclude-bones
 
   # Convert all files in a directory recursively
-	  agent convert --input ./recordings --recursive
+  agent convert --input ./recordings --recursive
 
   # Convert files matching a glob pattern
-	  agent convert --input ./recordings --glob "*.echoreplay"
+  agent convert --input ./recordings --glob "*.echoreplay"
 
   # Combine recursive and glob
-	  agent convert --input ./recordings --recursive --glob "rec_*.echoreplay"
+  agent convert --input ./recordings --recursive --glob "rec_*.echoreplay"
 
   # Validate data integrity via round-trip conversion
-	  agent convert --input game.echoreplay --validate`,
+  agent convert --input game.echoreplay --validate`,
 		RunE: runConverter,
 	}
 
@@ -77,7 +79,7 @@ func newConverterCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&convInputFile, "input", "i", "", "Input file path (.echoreplay or .nevrcap) (required)")
 	cmd.Flags().StringVarP(&convOutputFile, "output", "o", "", "Output file path (optional, format detected from extension)")
 	cmd.Flags().StringVar(&convOutputDir, "output-dir", "./", "Output directory for converted files")
-	cmd.Flags().StringVarP(&convFormat, "format", "f", "auto", "Output format: auto, echoreplay, nevrcap")
+	cmd.Flags().StringVarP(&convFormat, "format", "f", "auto", "Output format: auto, tape, echoreplay, nevrcap")
 	cmd.Flags().BoolVarP(&convVerbose, "verbose", "v", false, "Enable verbose logging")
 	cmd.Flags().BoolVar(&convOverwrite, "overwrite", false, "Overwrite existing output files")
 	cmd.Flags().BoolVarP(&convShowProgress, "progress", "p", false, "Show progress bar during conversion")
@@ -244,6 +246,18 @@ func convertFile(inputFile, outputFile string, showProgress bool) (*ConversionSt
 	}
 
 	// Perform conversion with progress support
+	if (inputFormat == "echoreplay" || inputFormat == "nevrcap") && outputFormat == "tape" {
+		result, err := conversion.ConvertFile(inputFile, outputFile)
+		if err != nil {
+			return nil, err
+		}
+		stats.FrameCount = int(result.FrameCount)
+		if outputInfo, err := os.Stat(outputFile); err == nil {
+			stats.OutputSize = outputInfo.Size()
+		}
+		return stats, nil
+	}
+
 	if inputFormat == "echoreplay" && outputFormat == "nevrcap" {
 		if showProgress || cfg.Converter.ExcludeBones {
 			if err := convertEchoReplayToNevrcapWithProgress(inputFile, outputFile); err != nil {
@@ -481,6 +495,8 @@ func getFileFormat(filename string) string {
 		return "echoreplay"
 	} else if strings.HasSuffix(lowerFile, ".nevrcap") {
 		return "nevrcap"
+	} else if strings.HasSuffix(lowerFile, ".tape") {
+		return "tape"
 	}
 	return "unknown"
 }
@@ -653,6 +669,29 @@ func countFrames(filename string) (int, error) {
 		}
 		return count, nil
 
+	case "tape":
+		tapeReader, err := codec.NewReader(filename)
+		if err != nil {
+			return 0, err
+		}
+		defer tapeReader.Close()
+
+		if _, err := tapeReader.ReadHeader(); err != nil {
+			return 0, err
+		}
+
+		count := 0
+		for {
+			if _, err := tapeReader.ReadFrame(); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return 0, err
+			}
+			count++
+		}
+		return count, nil
+
 	default:
 		return 0, fmt.Errorf("unknown format: %s", format)
 	}
@@ -688,7 +727,7 @@ func discoverFiles() ([]string, error) {
 		}
 
 		lowerPath := strings.ToLower(path)
-		if !strings.HasSuffix(lowerPath, ".echoreplay") && !strings.HasSuffix(lowerPath, ".nevrcap") {
+		if !strings.HasSuffix(lowerPath, ".echoreplay") && !strings.HasSuffix(lowerPath, ".nevrcap") && !strings.HasSuffix(lowerPath, ".tape") {
 			return nil
 		}
 
@@ -725,9 +764,9 @@ func determineOutputFileForInput(inputFile string) (string, error) {
 	targetFormat := cfg.Converter.Format
 	if targetFormat == "auto" {
 		if strings.HasSuffix(strings.ToLower(inputFile), ".echoreplay") {
-			targetFormat = "nevrcap"
+			targetFormat = "tape"
 		} else if strings.HasSuffix(strings.ToLower(inputFile), ".nevrcap") {
-			targetFormat = "echoreplay"
+			targetFormat = "tape"
 		} else {
 			return "", fmt.Errorf("cannot auto-detect target format for input file: %s", inputFile)
 		}
@@ -737,6 +776,9 @@ func determineOutputFileForInput(inputFile string) (string, error) {
 	var outputName string
 
 	switch targetFormat {
+	case "tape":
+		ext := filepath.Ext(inputBase)
+		outputName = strings.TrimSuffix(inputBase, ext) + ".tape"
 	case "echoreplay":
 		if strings.HasSuffix(strings.ToLower(inputBase), ".nevrcap") {
 			outputName = strings.TrimSuffix(inputBase, ".nevrcap") + ".echoreplay"

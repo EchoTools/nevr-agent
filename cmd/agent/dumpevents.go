@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,9 +12,10 @@ import (
 	"sync"
 	"time"
 
+	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
+	capturepb "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v2"
 	"github.com/echotools/tape/pkg/codec"
 	"github.com/echotools/tape/pkg/processing"
-	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"github.com/klauspost/compress/zstd"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
@@ -24,12 +26,13 @@ func newDumpEventsCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <replay-file> [output-format]",
 		Short: "Extract and display events from replay files",
-		Long: `Process replay files (.echoreplay or .nevrcap) and output detected events.
+		Long: `Process replay files (.tape, .echoreplay, or .nevrcap) and output detected events.
 
 Supported file formats:
+  .tape                  - Tape v2 format (zstd compressed, envelope-wrapped)
   .echoreplay            - EchoVR replay format (compressed zip)
   .echoreplay.uncompressed - EchoVR replay format (uncompressed)
-  .nevrcap               - NEVR capture format (zstd compressed)
+  .nevrcap               - NEVR capture format (zstd compressed, legacy)
   .nevrcap.uncompressed  - NEVR capture format (uncompressed)
 
 Output formats:
@@ -65,7 +68,7 @@ func runDumpEvents(cmd *cobra.Command, args []string) error {
 
 	// Validate file extension
 	lowerFilename := strings.ToLower(filename)
-	validExtensions := []string{".echoreplay", ".echoreplay.uncompressed", ".nevrcap", ".nevrcap.uncompressed"}
+	validExtensions := []string{".tape", ".echoreplay", ".echoreplay.uncompressed", ".nevrcap", ".nevrcap.uncompressed"}
 	hasValidExt := false
 	for _, ext := range validExtensions {
 		if strings.HasSuffix(lowerFilename, ext) {
@@ -74,7 +77,7 @@ func runDumpEvents(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if !hasValidExt {
-		return fmt.Errorf("file must have .echoreplay, .nevrcap (or .uncompressed variants) extension, got: %s", filename)
+		return fmt.Errorf("file must have .tape, .echoreplay, .nevrcap (or .uncompressed variants) extension, got: %s", filename)
 	}
 
 	// Process the file and output events
@@ -88,6 +91,10 @@ type frameReader interface {
 }
 
 func processReplayFile(filename, outputFormat string) error {
+	if strings.HasSuffix(strings.ToLower(filename), ".tape") {
+		return processTapeFile(filename, outputFormat)
+	}
+
 	// Open the replay file based on extension
 	var reader frameReader
 	var err error
@@ -528,4 +535,175 @@ func (r *uncompressedNevrCapReader) Close() error {
 		closer.Close()
 	}
 	return r.file.Close()
+}
+
+func processTapeFile(filename, outputFormat string) error {
+	reader, err := codec.NewReader(filename)
+	if err != nil {
+		return fmt.Errorf("processTapeFile: open reader: %w", err)
+	}
+	defer reader.Close()
+
+	header, err := reader.ReadHeader()
+	if err != nil {
+		return fmt.Errorf("processTapeFile: read header: %w", err)
+	}
+
+	eventStats := make(map[string]int)
+	frameCount := 0
+	var firstTimestampMs, lastTimestampMs uint32
+
+	for {
+		frame, err := reader.ReadFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("processTapeFile: read frame: %w", err)
+		}
+
+		frameCount++
+		lastTimestampMs = frame.GetTimestampOffsetMs()
+		if frameCount == 1 {
+			firstTimestampMs = frame.GetTimestampOffsetMs()
+		}
+
+		ea := frame.GetEchoArena()
+		if ea == nil {
+			continue
+		}
+
+		for _, evt := range ea.GetEvents() {
+			eventType := getV2EventTypeName(evt)
+
+			switch outputFormat {
+			case "json":
+				output := map[string]any{
+					"event_type":   eventType,
+					"event_data":   evt,
+					"frame_index":  frame.GetFrameIndex(),
+					"timestamp_ms": frame.GetTimestampOffsetMs(),
+					"game_status":  ea.GetGameStatus().String(),
+				}
+				encoder := json.NewEncoder(os.Stdout)
+				encoder.SetIndent("", "  ")
+				if err := encoder.Encode(output); err != nil {
+					return fmt.Errorf("processTapeFile: encode json: %w", err)
+				}
+			case "text":
+				fmt.Printf("[+%dms] Frame %d: %s (GameStatus: %s)\n",
+					frame.GetTimestampOffsetMs(),
+					frame.GetFrameIndex(),
+					eventType,
+					ea.GetGameStatus().String())
+			case "summary":
+				eventStats[eventType]++
+			default:
+				return fmt.Errorf("processTapeFile: unsupported output format: %s", outputFormat)
+			}
+		}
+	}
+
+	if outputFormat == "summary" {
+		outputTapeSummary(eventStats, frameCount, lastTimestampMs-firstTimestampMs, header, filename)
+	}
+
+	return nil
+}
+
+func outputTapeSummary(stats map[string]int, frameCount int, durationMs uint32, header *capturepb.CaptureHeader, filename string) {
+	fmt.Printf("=== Event Summary for %s ===\n", filepath.Base(filename))
+	fmt.Printf("Frames processed: %d\n", frameCount)
+	fmt.Printf("Duration: %v\n", time.Duration(durationMs)*time.Millisecond)
+
+	if eaHeader := header.GetEchoArena(); eaHeader != nil {
+		fmt.Printf("Session ID: %s\n", eaHeader.GetSessionId())
+		fmt.Printf("Map: %s\n", eaHeader.GetMapName())
+		fmt.Printf("Match type: %s\n", eaHeader.GetMatchType().String())
+	}
+	if header.GetCaptureId() != "" {
+		fmt.Printf("Capture ID: %s\n", header.GetCaptureId())
+	}
+	if header.GetCreatedAt() != nil {
+		fmt.Printf("Created at: %s\n", header.GetCreatedAt().AsTime().Format("2006-01-02 15:04:05"))
+	}
+	fmt.Println()
+
+	totalEvents := 0
+	for _, count := range stats {
+		totalEvents += count
+	}
+
+	fmt.Printf("Total events detected: %d\n", totalEvents)
+	fmt.Println("\nEvent breakdown:")
+
+	eventTypes := make([]string, 0, len(stats))
+	for eventType := range stats {
+		eventTypes = append(eventTypes, eventType)
+	}
+
+	for _, eventType := range eventTypes {
+		count := stats[eventType]
+		fmt.Printf("  %-25s: %d\n", eventType, count)
+	}
+
+	if frameCount > 0 && durationMs > 0 {
+		eventsPerSecond := float64(totalEvents) / (float64(durationMs) / 1000.0)
+		fmt.Printf("\nAverage events per second: %.2f\n", eventsPerSecond)
+	}
+}
+
+func getV2EventTypeName(evt *capturepb.EchoEvent) string {
+	switch evt.GetEvent().(type) {
+	case *capturepb.EchoEvent_RoundStarted:
+		return "RoundStarted"
+	case *capturepb.EchoEvent_RoundPaused:
+		return "RoundPaused"
+	case *capturepb.EchoEvent_RoundUnpaused:
+		return "RoundUnpaused"
+	case *capturepb.EchoEvent_RoundEnded:
+		return "RoundEnded"
+	case *capturepb.EchoEvent_MatchEnded:
+		return "MatchEnded"
+	case *capturepb.EchoEvent_ScoreboardUpdated:
+		return "ScoreboardUpdated"
+	case *capturepb.EchoEvent_PlayerJoined:
+		return "PlayerJoined"
+	case *capturepb.EchoEvent_PlayerLeft:
+		return "PlayerLeft"
+	case *capturepb.EchoEvent_PlayerSwitchedTeam:
+		return "PlayerSwitchedTeam"
+	case *capturepb.EchoEvent_EmotePlayed:
+		return "EmotePlayed"
+	case *capturepb.EchoEvent_DiscPossessionChanged:
+		return "DiscPossessionChanged"
+	case *capturepb.EchoEvent_DiscThrown:
+		return "DiscThrown"
+	case *capturepb.EchoEvent_DiscCaught:
+		return "DiscCaught"
+	case *capturepb.EchoEvent_GoalScored:
+		return "GoalScored"
+	case *capturepb.EchoEvent_PlayerGoal:
+		return "PlayerGoal"
+	case *capturepb.EchoEvent_PlayerSave:
+		return "PlayerSave"
+	case *capturepb.EchoEvent_PlayerStun:
+		return "PlayerStun"
+	case *capturepb.EchoEvent_PlayerPass:
+		return "PlayerPass"
+	case *capturepb.EchoEvent_PlayerSteal:
+		return "PlayerSteal"
+	case *capturepb.EchoEvent_PlayerBlock:
+		return "PlayerBlock"
+	case *capturepb.EchoEvent_PlayerInterception:
+		return "PlayerInterception"
+	case *capturepb.EchoEvent_PlayerAssist:
+		return "PlayerAssist"
+	case *capturepb.EchoEvent_PlayerShotTaken:
+		return "PlayerShotTaken"
+	case *capturepb.EchoEvent_GenericEvent:
+		return "GenericEvent"
+	default:
+		return "Unknown"
+	}
 }
