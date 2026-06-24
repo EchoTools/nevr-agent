@@ -132,3 +132,14 @@ func TestCLIReplayRequiresFiles(t *testing.T) {
 		t.Fatal("Expected error when running replay without files, but got none")
 	}
 }
+
+func TestStreamFormatFlagDefault(t *testing.T) {
+	cmd := newAgentCommand()
+	formatFlag := cmd.Flags().Lookup("format")
+	if formatFlag == nil {
+		t.Fatal("format flag not found")
+	}
+	if formatFlag.DefValue != "tape" {
+		t.Errorf("format flag default = %q, want %q", formatFlag.DefValue, "tape")
+	}
+}

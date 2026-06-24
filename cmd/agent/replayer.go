@@ -169,6 +169,8 @@ func (rs *ReplayServer) playFile(filename string) error {
 	switch ext {
 	case ".echoreplay":
 		return rs.playEchoReplayFile(filename)
+	case ".tape":
+		return fmt.Errorf("replayer: .tape replay not yet supported — convert first: agent convert --input %s --format echoreplay", filepath.Base(filename))
 	default:
 		return fmt.Errorf("unsupported file format: %s", ext)
 	}

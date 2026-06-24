@@ -102,7 +102,7 @@ func DefaultConfig() *Config {
 		LogFile:  "",
 		Agent: AgentConfig{
 			Frequency:       10,
-			Format:          "nevrcap",
+			Format:          "tape",
 			OutputDirectory: "output",
 		},
 		APIServer: APIServerConfig{

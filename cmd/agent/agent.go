@@ -99,7 +99,7 @@ Targets are specified as host:port or host:startPort-endPort for port ranges.`,
 
 	// Agent-specific flags
 	cmd.Flags().IntVarP(&frequency, "frequency", "f", 10, "Polling frequency in Hz")
-	cmd.Flags().StringVar(&format, "format", "nevrcap", "Output format (nevrcap, echoreplay, none, or comma-separated)")
+	cmd.Flags().StringVar(&format, "format", "tape", "Output format (tape, nevrcap, echoreplay, none, or comma-separated)")
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "output", "Output directory for recorded files")
 
 	// Events API options
@@ -300,13 +300,19 @@ OuterLoop:
 						go replayWriter.ProcessFrames()
 						writers = append(writers, replayWriter)
 					case "nevrcap":
-						fallthrough
-					default:
 						filename = agent.NevrCapSessionFilename(time.Now(), meta.SessionUUID)
 						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
 						nevrcapWriter := agent.NewNevrCapLogSession(ctx, logger, outputPath, meta.SessionUUID)
 						go nevrcapWriter.ProcessFrames()
 						writers = append(writers, nevrcapWriter)
+					case "tape":
+						fallthrough
+					default:
+						filename = agent.TapeSessionFilename(time.Now(), meta.SessionUUID)
+						outputPath = filepath.Join(cfg.Agent.OutputDirectory, filename)
+						tapeWriter := agent.NewTapeLogSession(ctx, logger, outputPath, meta.SessionUUID)
+						go tapeWriter.ProcessFrames()
+						writers = append(writers, tapeWriter)
 					}
 				}
 
