@@ -157,8 +157,10 @@ function Start-MonitoredProcess {
 
 # --- Script Execution Starts Here ---
 # Guard so the file can be dot-sourced by tests without launching the server.
-# When dot-sourced, $MyInvocation.InvocationName is '.'; when run directly it isn't.
-if ($MyInvocation.InvocationName -ne '.') {
+# Gated on an env var the TEST sets — production never sets it, so the launcher
+# ALWAYS runs no matter how it's invoked (double-click, -File, .\CEVR.ps1,
+# positional, or dot-source). This avoids the fragile InvocationName check.
+if (-not $env:CEVR_NORUN) {
     $exePath = "C:\echovr\ready-at-dawn-echo-arena\bin\win10\echovr.exe"
     $baseArgs = "-noovr -server -headless -fixedtimestep -noaudio -timestep 180 -exitonerror"
 

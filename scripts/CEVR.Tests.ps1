@@ -1,7 +1,9 @@
 # Tests for CEVR.ps1's port-bind gate (Wait-PortListening). Dot-sources the script
-# (the execution guard keeps it from launching echovr) and exercises the gate the
-# way the monitor loop uses it. Run: pwsh -File scripts/CEVR.Tests.ps1
+# (CEVR_NORUN keeps it from launching echovr) and exercises the gate the way the
+# monitor loop uses it. Run: pwsh -File scripts/CEVR.Tests.ps1
+$env:CEVR_NORUN = '1'
 . "$PSScriptRoot/CEVR.ps1"
+$env:CEVR_NORUN = $null
 
 $fail = 0
 function Check($name, $cond) {
