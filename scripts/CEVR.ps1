@@ -44,6 +44,34 @@ function Get-AvailableTcpPort {
     throw "Could not find an available TCP port after 1000 attempts."
 }
 
+function Wait-PortListening {
+    # Poll until something is LISTENING on $Port (i.e. echovr has bound its
+    # -httpport), or until the process dies / the timeout elapses. Returns $true
+    # only if the port actually came up. This is the gate that was missing: without
+    # it, a slow-to-bind echovr looks dead and the monitor cycles new instances on
+    # top of it. Uses a plain TcpClient connect so it needs no extra modules (PS 5.1).
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutSec = 60,
+        [int]$PollMs = 500,
+        [System.Diagnostics.Process]$Process
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        # If echovr already exited, stop waiting — it never got healthy.
+        if ($null -ne $Process -and $Process.HasExited) { return $false }
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            $client.Connect([System.Net.IPAddress]::Loopback, $Port)
+            $client.Close()
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds $PollMs
+        }
+    }
+    return $false
+}
+
 function Start-MonitoredProcess {
     [CmdletBinding()]
     param(
@@ -54,7 +82,11 @@ function Start-MonitoredProcess {
 
         [int]$InitialRestartDelaySec = 3,
 
-        [int]$MaxRestartDelaySec = 60
+        [int]$MaxRestartDelaySec = 60,
+
+        # How long to wait for echovr to bind its -httpport before declaring the
+        # launch failed. echovr loads ~569 DLLs, so give it real headroom.
+        [int]$PortBindTimeoutSec = 90
     )
 
     $currentDelay = $InitialRestartDelaySec
@@ -70,6 +102,24 @@ function Start-MonitoredProcess {
 
             $process = Start-Process -FilePath $FilePath -ArgumentList $argumentsWithPort -PassThru
             $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+
+            # Gate: wait for echovr to actually BIND its http port before treating it
+            # as healthy. Without this the loop can't tell "still starting up" from
+            # "dead", so it cycles fresh instances on top of a slow-to-bind one
+            # (the 2-3 churning). If the port never comes up (or echovr dies during
+            # startup), kill it and back off instead of hammering.
+            if (-not (Wait-PortListening -Port $portInfo.Port -TimeoutSec $PortBindTimeoutSec -Process $process)) {
+                Write-Warning "echovr did not bind http port $($portInfo.Port) within $PortBindTimeoutSec s. Killing and backing off $currentDelay s."
+                if (-not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                }
+                Start-Sleep -Seconds $currentDelay
+                $currentDelay = [System.Math]::Min($currentDelay * 2, $MaxRestartDelaySec)
+                continue
+            }
+            Write-Verbose "echovr bound http port $($portInfo.Port); healthy. Serving."
+            # A healthy bind resets the backoff — this was a good launch.
+            $currentDelay = $InitialRestartDelaySec
 
             # Wait for the process to exit
             $process | Wait-Process
@@ -106,9 +156,12 @@ function Start-MonitoredProcess {
 }
 
 # --- Script Execution Starts Here ---
+# Guard so the file can be dot-sourced by tests without launching the server.
+# When dot-sourced, $MyInvocation.InvocationName is '.'; when run directly it isn't.
+if ($MyInvocation.InvocationName -ne '.') {
+    $exePath = "C:\echovr\ready-at-dawn-echo-arena\bin\win10\echovr.exe"
+    $baseArgs = "-noovr -server -headless -fixedtimestep -noaudio -timestep 180 -exitonerror"
 
-$exePath = "C:\echovr\ready-at-dawn-echo-arena\bin\win10\echovr.exe"
-$baseArgs = "-noovr -server -headless -fixedtimestep -noaudio -timestep 180 -exitonerror"
-
-# Call the main function with the configured parameters
-Start-MonitoredProcess -FilePath $exePath -ArgumentList $baseArgs -Verbose
+    # Call the main function with the configured parameters
+    Start-MonitoredProcess -FilePath $exePath -ArgumentList $baseArgs -Verbose
+}
