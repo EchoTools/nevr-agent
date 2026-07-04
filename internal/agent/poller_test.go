@@ -11,6 +11,80 @@ import (
 	"go.uber.org/zap"
 )
 
+func TestPollIntervalForState(t *testing.T) {
+	const active = time.Second / 30 // --frequency 30
+	const idle = time.Second / 1    // --idle-fps 1 (default)
+
+	cases := []struct {
+		name       string
+		gameStatus string
+		cfg        PollerConfig
+		want       time.Duration
+	}{
+		{
+			// The bug: basic `--frequency 30` recording (no --active-only).
+			// idle-fps defaults to 1, but the user did NOT opt into idle
+			// bandwidth mode, so non-"playing" phases must stay at 30 Hz.
+			name:       "basic recording keeps active rate during non-playing phase",
+			gameStatus: "score",
+			cfg:        PollerConfig{IdleFPS: 1, ActiveOnly: false},
+			want:       active,
+		},
+		{
+			name:       "basic recording keeps active rate while playing",
+			gameStatus: "playing",
+			cfg:        PollerConfig{IdleFPS: 1, ActiveOnly: false},
+			want:       active,
+		},
+		{
+			name:       "active-only mode drops to idle during non-playing phase",
+			gameStatus: "social_lobby",
+			cfg:        PollerConfig{IdleFPS: 1, ActiveOnly: true},
+			want:       idle,
+		},
+		{
+			name:       "active-only mode uses active rate while playing",
+			gameStatus: "playing",
+			cfg:        PollerConfig{IdleFPS: 1, ActiveOnly: true},
+			want:       active,
+		},
+		{
+			name:       "active-only with idle-fps disabled stays active",
+			gameStatus: "social_lobby",
+			cfg:        PollerConfig{IdleFPS: 0, ActiveOnly: true},
+			want:       active,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pollIntervalForState(tc.gameStatus, tc.cfg, active, idle)
+			if got != tc.want {
+				t.Errorf("pollIntervalForState(%q, %+v) = %v, want %v", tc.gameStatus, tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestActiveGameplayRecordsAtFrequency encodes the reported bug in product
+// terms: with `--frequency 30` and no --active-only, every phase of a real
+// match must be polled at the active rate, so active gameplay records at ~30
+// fps instead of collapsing to the default idle rate of 1 fps.
+func TestActiveGameplayRecordsAtFrequency(t *testing.T) {
+	const active = time.Second / 30
+	const idle = time.Second
+	cfg := PollerConfig{IdleFPS: 1, ActiveOnly: false}
+
+	matchSequence := []string{
+		"pre_match", "round_start", "playing", "playing",
+		"score", "playing", "round_over", "post_match",
+	}
+	for _, status := range matchSequence {
+		if got := pollIntervalForState(status, cfg, active, idle); got != active {
+			t.Fatalf("status %q: interval %v, want active %v (basic recording must stay at --frequency)", status, got, active)
+		}
+	}
+}
+
 func testLogger(t testing.TB) *zap.Logger {
 	logger, err := zap.NewDevelopment()
 	if err != nil {

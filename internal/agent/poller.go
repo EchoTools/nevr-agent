@@ -62,6 +62,23 @@ func isPausedState(gameStatus string) bool {
 	return gameStatus == "round_paused" || gameStatus == "paused"
 }
 
+// pollIntervalForState returns the polling interval that should be used for the
+// given game status, driven purely by game state so it can be decided on every
+// poll independently of the event/mode filters.
+//
+// Idle down-switching is a bandwidth optimization that only applies when the
+// caller opted into active-only capture (--active-only). Without that opt-in a
+// basic `--frequency N` recording must stay at N Hz across every game phase
+// (pre_match, round_start, score, round_over, ...), not just while
+// game_status == "playing" — otherwise the default --idle-fps of 1 silently
+// caps active gameplay at 1 fps.
+func pollIntervalForState(gameStatus string, cfg PollerConfig, activeInterval, idleInterval time.Duration) time.Duration {
+	if cfg.ActiveOnly && cfg.IdleFPS > 0 && !isActiveGameplay(gameStatus) {
+		return idleInterval
+	}
+	return activeInterval
+}
+
 var (
 	EndpointSession = func(baseURL string) string {
 		return baseURL + "/session"
@@ -97,8 +114,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		processor         = processing.NewWithDetector(events.NewWithDefaultSensors(events.WithSynchronousProcessing()))
 		sessionBuffer     = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
 		playerBonesBuffer = bytes.NewBuffer(make([]byte, 0, 64*1024)) // 64KB buffer
-		lastGameStatus    string
-		isIdle            bool
+		currentInterval   = interval                                  // tracks the ticker's current interval
 	)
 
 	requestCount := 0
@@ -211,6 +227,17 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 			matchType = frame.Session.GetMatchType()
 		}
 
+		// Decide polling cadence purely from game state, BEFORE any filter
+		// below can `continue`. This must run on every poll so a resumed match
+		// immediately returns to the active rate instead of being gated behind
+		// whether a frame happened to carry an event or pass a mode filter.
+		desiredInterval := pollIntervalForState(gameStatus, pollerCfg, interval, idleInterval)
+		if desiredInterval != currentInterval {
+			currentInterval = desiredInterval
+			ticker.Reset(desiredInterval)
+			logger.Debug("Adjusted polling rate", zap.Duration("interval", desiredInterval))
+		}
+
 		// Check if game mode should be streamed
 		if !pollerCfg.shouldStreamMode(matchType) {
 			continue
@@ -239,21 +266,6 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		if pollerCfg.ExcludeBones {
 			frame.PlayerBones = nil
 		}
-
-		// Adjust ticker interval based on game state
-		newIsIdle := !isActiveGameplay(gameStatus)
-		if newIsIdle != isIdle {
-			isIdle = newIsIdle
-			if isIdle && pollerCfg.IdleFPS > 0 && pollerCfg.IdleFPS != pollerCfg.FPS {
-				ticker.Reset(idleInterval)
-				logger.Debug("Switched to idle polling rate", zap.Duration("interval", idleInterval))
-			} else if !isIdle {
-				ticker.Reset(interval)
-				logger.Debug("Switched to active polling rate", zap.Duration("interval", interval))
-			}
-		}
-		lastGameStatus = gameStatus
-		_ = lastGameStatus // suppress unused warning
 
 		// Write the data to the FrameWriter
 		if err := session.WriteFrame(frame); err != nil {
