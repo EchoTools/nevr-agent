@@ -48,6 +48,8 @@ type WebSocketWriter struct {
 	outgoingCh chan *telemetry.LobbySessionStateFrame
 	stopped    bool
 	connected  bool
+	// supervising guards the single reconnectLoop; see Connect.
+	supervising bool
 
 	// writeMu serialises EVERY conn.Write* in this file. gorilla/websocket
 	// permits one concurrent writer and panics ("concurrent write to websocket
@@ -109,12 +111,32 @@ func NewWebSocketWriter(logger *zap.Logger, socketURL, jwtToken string) *WebSock
 	return w
 }
 
-// Connect establishes the WebSocket connection.
+// Connect establishes the WebSocket connection and starts the single supervisor.
+//
+// reconnectLoop is started HERE, exactly once, rather than in connectLocked.
+// connectLocked is what reconnectLoop calls to re-dial, so starting a supervisor
+// from inside it meant every reconnect spawned another supervisor, each of which
+// spawned another on its next reconnect -- geometric growth, and with it multiple
+// readLoops calling ReadMessage on one connection. gorilla permits ONE concurrent
+// reader and one concurrent writer; the race detector reports the read side as
+// ten DATA RACEs inside Conn.NextReader across a single reconnect test, and the
+// write side is what writeMu now covers.
+//
+// This is the minimum fix for that: one supervisor, so nothing multiplies. The
+// per-connection loops still respawn, because they must -- they return when their
+// own connection dies.
 func (w *WebSocketWriter) Connect() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.connectLocked()
+	if err := w.connectLocked(); err != nil {
+		return err
+	}
+	if !w.supervising {
+		w.supervising = true
+		go w.reconnectLoop()
+	}
+	return nil
 }
 
 // connectLocked establishes the WebSocket connection (must be called with lock held)
@@ -154,10 +176,11 @@ func (w *WebSocketWriter) connectLocked() error {
 
 	w.logger.Debug("WebSocket connection established, starting background routines", zap.String("url", u.String()))
 
-	// Start background routines
+	// Start the per-connection routines. readLoop and writeLoop are per-connection
+	// by design: both return when their conn fails, and the next connect replaces
+	// them. reconnectLoop is NOT started here -- see Connect.
 	go w.readLoop()
 	go w.writeLoop()
-	go w.reconnectLoop()
 
 	return nil
 }
