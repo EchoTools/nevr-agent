@@ -7,8 +7,8 @@ import (
 	"time"
 
 	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
-	"github.com/echotools/tape/pkg/codec"
-	"github.com/echotools/tape/pkg/conversion"
+	"github.com/echotools/tape/v4/pkg/codec"
+	"github.com/echotools/tape/v4/pkg/conversion"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -123,8 +123,13 @@ func (t *TapeLogSession) ProcessFrames() error {
 		BaseTime: firstFrame.GetTimestamp().AsTime(),
 	}
 
-	// Map and write the first frame.
-	v2frame := mapper.MapFrame(firstFrame)
+	// Map and write the first frame. MapFrame returns an error since tape v4
+	// (ErrTimestampOffsetOverflow); it is propagated rather than dropped —
+	// a frame that cannot be mapped must not be silently omitted from a capture.
+	v2frame, err := mapper.MapFrame(firstFrame)
+	if err != nil {
+		return fmt.Errorf("writer_tape: failed to map first frame: %w", err)
+	}
 	if err := writer.WriteFrame(v2frame); err != nil {
 		return fmt.Errorf("writer_tape: failed to write first frame: %w", err)
 	}
@@ -170,7 +175,13 @@ OuterLoop:
 			break OuterLoop
 		}
 
-		v2frame := mapper.MapFrame(frame)
+		v2frame, err := mapper.MapFrame(frame)
+		if err != nil {
+			t.logger.Error("failed to map frame",
+				zap.String("file_path", t.filePath),
+				zap.Error(err))
+			break OuterLoop
+		}
 		if err := writer.WriteFrame(v2frame); err != nil {
 			t.logger.Error("failed to write frame to tape file",
 				zap.String("file_path", t.filePath),
