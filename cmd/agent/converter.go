@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/echotools/nevr-agent/v4/internal/agent"
-	"github.com/echotools/tape/pkg/codec"
-	"github.com/echotools/tape/pkg/conversion"
+	"github.com/echotools/tape/v4/pkg/codec"
+	"github.com/echotools/tape/v4/pkg/conversion"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -274,7 +274,9 @@ func convertFile(inputFile, outputFile string, showProgress bool) (*ConversionSt
 				return nil, err
 			}
 		} else {
-			if err := conversion.ConvertNevrcapToEchoReplay(inputFile, outputFile); err != nil {
+			// tape v4 removed ConvertNevrcapToEchoReplay. ReconstructFile is the
+			// v2 -> echoreplay reverse path and additionally returns the frame count.
+			if _, err := conversion.ReconstructFile(inputFile, outputFile); err != nil {
 				return nil, err
 			}
 		}
@@ -824,7 +826,7 @@ func validateRoundTrip(inputFile string) error {
 	}
 
 	logger.Info("Converting back to echoreplay", zap.String("temp", tempEchoreplay))
-	if err := conversion.ConvertNevrcapToEchoReplay(tempNevrcap, tempEchoreplay); err != nil {
+	if _, err := conversion.ReconstructFile(tempNevrcap, tempEchoreplay); err != nil {
 		return fmt.Errorf("failed to convert back to echoreplay: %w", err)
 	}
 

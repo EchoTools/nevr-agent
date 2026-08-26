@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/echotools/tape/pkg/codec"
+	"github.com/echotools/tape/v4/pkg/codec"
 	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
 	"go.uber.org/zap"
 )

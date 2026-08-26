@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,9 +14,13 @@ import (
 	"time"
 
 	telemetry "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v1"
+	capturepb "buf.build/gen/go/echotools/nevr-api/protocolbuffers/go/telemetry/v2"
+	"github.com/echotools/tape/v4/pkg/conversion"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -44,9 +49,39 @@ type WebSocketWriter struct {
 	stopped    bool
 	connected  bool
 
+	// writeMu serialises EVERY conn.Write* in this file. gorilla/websocket
+	// permits one concurrent writer and panics ("concurrent write to websocket
+	// connection") otherwise, killing the process. Three writers can reach one
+	// connection here: the ping ticker, the frame path, and the footer written
+	// from Close(). A fourth arrives on its own: connectLocked starts a fresh
+	// readLoop/writeLoop/reconnectLoop on EVERY reconnect without stopping the
+	// previous set, so after N reconnects there are N writeLoops sharing w.conn
+	// (visible in a reconnect test as duplicated "Attempting to reconnect" lines
+	// and a connEpoch that jumps by more than one). That goroutine
+	// multiplication predates this change and is NOT fixed here; this mutex
+	// stops it from being a crash.
+	writeMu sync.Mutex
+
 	// Reconnection state
 	reconnectCh    chan struct{}
 	disconnectedAt time.Time
+
+	// v2 capture state. The wire is telemetry v2 (see writeEnvelope): a
+	// CaptureHeader, then Frames, then a CaptureFooter. The server builds a fresh
+	// session per CONNECTION and rejects a frame that arrives before a header, so
+	// the header must be re-sent after every reconnect -- not once per process.
+	//
+	// That is tracked by epoch rather than by a bool reset at each disconnect
+	// site: connEpoch increments on every successful connect (one write site),
+	// headerEpoch records the epoch the header was last accepted in. They differ
+	// exactly when this connection has not been given a header yet, which is
+	// correct for disconnect paths nobody enumerated.
+	connEpoch   uint64
+	headerEpoch uint64
+	mapper      *conversion.FrameMapper
+	header      *capturepb.CaptureHeader
+	frameCount  uint32
+	lastTsMs    uint32
 
 	// Disk buffer state
 	diskBufferMu    sync.Mutex
@@ -115,6 +150,7 @@ func (w *WebSocketWriter) connectLocked() error {
 
 	w.conn = conn
 	w.connected = true
+	w.connEpoch++
 
 	w.logger.Debug("WebSocket connection established, starting background routines", zap.String("url", u.String()))
 
@@ -217,6 +253,10 @@ func (w *WebSocketWriter) WriteFrame(frame *telemetry.LobbySessionStateFrame) er
 
 // Close stops the writer and closes the connection.
 func (w *WebSocketWriter) Close() {
+	// Close the capture before tearing the connection down. Taken outside the
+	// lock because sendFooter takes it.
+	w.sendFooter()
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -321,7 +361,10 @@ func (w *WebSocketWriter) writeLoop() {
 				continue
 			}
 
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			w.writeMu.Lock()
+			err := conn.WriteMessage(websocket.PingMessage, nil)
+			w.writeMu.Unlock()
+			if err != nil {
 				w.logger.Warn("Failed to send ping, triggering reconnect", zap.Error(err))
 				w.mu.Lock()
 				w.connected = false
@@ -363,23 +406,7 @@ func (w *WebSocketWriter) writeLoop() {
 					zap.Uint32("frame_index", frame.FrameIndex))
 			}
 
-			// Wrap frame in Envelope
-			envelope := &telemetry.Envelope{
-				Message: &telemetry.Envelope_Frame{
-					Frame: frame,
-				},
-			}
-
-			data, err := marshaler.Marshal(envelope)
-			if err != nil {
-				w.logger.Error("Failed to marshal envelope", zap.Error(err))
-				continue
-			}
-
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			err = conn.WriteMessage(websocket.TextMessage, data)
-
-			if err != nil {
+			if err := w.sendFrame(conn, frame); err != nil {
 				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
 				w.mu.Lock()
 				w.connected = false
@@ -390,6 +417,138 @@ func (w *WebSocketWriter) writeLoop() {
 			}
 		}
 	}
+}
+
+// encodeEnvelope serialises a telemetry v2 Envelope in the ingest wire format:
+// a 4-byte little-endian length prefix followed by the marshalled Envelope. This
+// is the exact framing nevr-stream's ParseEnvelope expects, and the same framing
+// its reflected stream emits back, so one codec serves both directions.
+func encodeEnvelope(env *capturepb.Envelope) ([]byte, error) {
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("marshal envelope: %w", err)
+	}
+	buf := make([]byte, 4+len(data))
+	binary.LittleEndian.PutUint32(buf[:4], uint32(len(data)))
+	copy(buf[4:], data)
+	return buf, nil
+}
+
+// writeEnvelope writes one length-prefixed v2 Envelope as a BINARY message.
+// The previous wire was a telemetry v1 Envelope marshalled with protojson and
+// sent as a TEXT message; nevr-stream accepts neither -- it parses a 4-byte LE
+// prefix into a telemetry v2 Envelope and rejects any non-binary frame outright
+// ("only binary messages accepted"). Both halves were built and could not talk.
+func (w *WebSocketWriter) writeEnvelope(conn *websocket.Conn, env *capturepb.Envelope) error {
+	data, err := encodeEnvelope(env)
+	if err != nil {
+		return err
+	}
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// sendFrame maps a v1 frame to v2 and writes it, sending the CaptureHeader first
+// whenever the current connection has not been given one. Mapping is the same
+// path writer_tape.go uses (MapHeaderFromSession + FrameMapper), so the socket
+// and the .tape file carry identical captures rather than two dialects.
+func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.LobbySessionStateFrame) error {
+	w.mu.Lock()
+	needHeader := w.headerEpoch != w.connEpoch
+	epoch := w.connEpoch
+	mapper := w.mapper
+	w.mu.Unlock()
+
+	if mapper == nil {
+		// First frame of the capture: its session data is what the header is
+		// built from, and its timestamp is the base every offset is relative to.
+		base := frame.GetTimestamp().AsTime()
+		v1hdr := &telemetry.TelemetryHeader{
+			CaptureId: frame.GetSession().GetSessionId(),
+			CreatedAt: timestamppb.New(base),
+			Metadata:  map[string]string{"format": "tape"},
+		}
+		header := conversion.MapHeaderFromSession(v1hdr, frame.GetSession())
+		mapper = &conversion.FrameMapper{BaseTime: base}
+
+		w.mu.Lock()
+		w.header = header
+		w.mapper = mapper
+		w.mu.Unlock()
+	}
+
+	if needHeader {
+		w.mu.Lock()
+		header := w.header
+		w.mu.Unlock()
+		if header == nil {
+			return fmt.Errorf("no capture header available")
+		}
+		if err := w.writeEnvelope(conn, capturepb.Envelope_builder{Header: header}.Build()); err != nil {
+			return fmt.Errorf("write header: %w", err)
+		}
+		w.mu.Lock()
+		// Guard against a reconnect that raced this write: only claim the epoch
+		// this header was actually written for.
+		if w.connEpoch == epoch {
+			w.headerEpoch = epoch
+		}
+		w.mu.Unlock()
+		w.logger.Debug("Sent capture header", zap.Uint64("conn_epoch", epoch))
+	}
+
+	v2frame, err := mapper.MapFrame(frame)
+	if err != nil {
+		// A frame that cannot be mapped is dropped rather than killing the
+		// connection: the error is per-frame (timestamp offset overflow), not
+		// per-stream, and taking the socket down would lose the whole capture.
+		w.logger.Error("Failed to map frame to v2, dropping it", zap.Error(err),
+			zap.Uint32("frame_index", frame.GetFrameIndex()))
+		return nil
+	}
+
+	if err := w.writeEnvelope(conn, capturepb.Envelope_builder{Frame: v2frame}.Build()); err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	w.frameCount++
+	if ts := v2frame.GetTimestampOffsetMs(); ts > w.lastTsMs {
+		w.lastTsMs = ts
+	}
+	w.mu.Unlock()
+	return nil
+}
+
+// sendFooter writes the CaptureFooter that closes the capture. A capture that
+// ends without one is a truncated capture, which is exactly what a dropped
+// connection should look like -- so this is best-effort and never synthesised
+// from a connection that never carried a header.
+func (w *WebSocketWriter) sendFooter() {
+	w.mu.Lock()
+	conn := w.conn
+	connected := w.connected && !w.stopped
+	sent := w.headerEpoch == w.connEpoch && w.headerEpoch != 0
+	footer := capturepb.CaptureFooter_builder{
+		FrameCount: w.frameCount,
+		DurationMs: w.lastTsMs,
+	}.Build()
+	w.mu.Unlock()
+
+	if !connected || conn == nil || !sent {
+		return
+	}
+	if err := w.writeEnvelope(conn, capturepb.Envelope_builder{Footer: footer}.Build()); err != nil {
+		w.logger.Warn("Failed to send capture footer", zap.Error(err))
+		return
+	}
+	w.logger.Info("Sent capture footer",
+		zap.Uint32("frames", footer.GetFrameCount()),
+		zap.Uint32("duration_ms", footer.GetDurationMs()))
 }
 
 // bufferToDisk writes a frame to the disk buffer file
@@ -489,9 +648,23 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 			return
 		}
 
-		data := scanner.Bytes()
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		// Buffered lines are v1 protojson Envelopes (see bufferToDisk). They are
+		// re-mapped and sent through sendFrame rather than replayed raw: the raw
+		// bytes are the OLD wire, so draining them verbatim would push text
+		// frames the server rejects -- and only after a reconnect, which is the
+		// hardest case to notice. Routing them through sendFrame also means a
+		// drained frame re-sends the CaptureHeader when the new connection needs
+		// one, exactly like a live frame.
+		var buffered telemetry.Envelope
+		if err := protojson.Unmarshal(scanner.Bytes(), &buffered); err != nil {
+			w.logger.Warn("Skipping unparseable buffered frame", zap.Error(err))
+			continue
+		}
+		bf := buffered.GetFrame()
+		if bf == nil {
+			continue
+		}
+		if err := w.sendFrame(conn, bf); err != nil {
 			w.logger.Warn("Failed to send buffered frame, will retry on next reconnect", zap.Error(err))
 			w.mu.Lock()
 			w.connected = false
