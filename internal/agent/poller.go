@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/echotools/tape/v4/pkg/events"
@@ -117,14 +118,18 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		currentInterval   = interval                                  // tracks the ticker's current interval
 	)
 
-	requestCount := 0
-	dataWritten := 0
+	// Atomic: the per-URL GET goroutines below write dataWritten concurrently,
+	// and the ctx-done goroutine reads both while the loop writes them. These
+	// are debug counters, but a race is a race -- caught 2026-08-28 when the
+	// poller was first run under -race (no prior test did). Same family as the
+	// concurrent-write races closed in the WebSocket writers.
+	var requestCount, dataWritten atomic.Int64
 
 	defer session.Close()
 
 	go func() {
 		<-ctx.Done()
-		logger.Debug("HTTP frame poller done", zap.Int("request_count", requestCount), zap.Int("data_written", dataWritten))
+		logger.Debug("HTTP frame poller done", zap.Int64("request_count", requestCount.Load()), zap.Int64("data_written", dataWritten.Load()))
 	}()
 
 	enableDebugLogging := logger.Core().Enabled(zap.DebugLevel)
@@ -135,7 +140,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 		case <-ctx.Done():
 			return
 		case <-timeoutTimer.C:
-			logger.Debug("HTTP frame poller timeout, stopping", zap.Int("request_count", requestCount), zap.Int("data_written", dataWritten))
+			logger.Debug("HTTP frame poller timeout, stopping", zap.Int64("request_count", requestCount.Load()), zap.Int64("data_written", dataWritten.Load()))
 			return
 		case <-ticker.C:
 		}
@@ -147,7 +152,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 			playerBonesURL: playerBonesBuffer,
 		} {
 			buf.Reset()
-			requestCount++
+			requestCount.Add(1)
 			go func() {
 				defer wg.Done()
 				resp, err := client.Get(url)
@@ -181,7 +186,7 @@ func NewHTTPFramePoller(ctx context.Context, logger *zap.Logger, client *http.Cl
 					logger.Warn("Failed to read response body", zap.String("url", url), zap.Error(err))
 					return
 				}
-				dataWritten += int(n)
+				dataWritten.Add(n)
 			}()
 		}
 
