@@ -256,3 +256,69 @@ func TestWebSocketWriter_ResendsHeaderAfterReconnect(t *testing.T) {
 			"a header sent once per process leaves every reconnected capture headerless", headers)
 	}
 }
+
+// TestWebSocketWriter_ReseedsBaselineAfterReconnect covers the gap the
+// header-per-connection fix left open, found on a live rig 2026-08-28: the
+// server was restarted mid-match, the agent reconnected and re-sent the header,
+// and every spectator sat on "waiting for player stats" until the next match.
+//
+// tape's FrameMapper emits PlayerStatsUpdated (and loadout/grab) on FIRST
+// SIGHTING and then only on change. Across a reconnect the mapper kept its
+// state, so the new connection -- a fresh session on the server, a fresh tape
+// file, fresh spectators -- got a header and then frames carrying no baseline.
+// Nothing downstream can rebuild a counter it was never sent.
+func TestWebSocketWriter_ReseedsBaselineAfterReconnect(t *testing.T) {
+	// Hang up after header + two frames. The frames' stats never change, so
+	// without a re-seed the second connection carries no stats event at all.
+	srv := newWireServer(t, 3)
+	w := NewWebSocketWriter(testLogger(t), srv.wsURL(), "")
+	if err := w.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer w.Close()
+
+	base := time.Date(2026, 8, 28, 19, 0, 0, 0, time.UTC)
+	for i := 0; i < 8; i++ {
+		f := makeRosterFrame("sess-reseed", uint32(i), base.Add(time.Duration(i)*100*time.Millisecond))
+		f.Session.Teams[0].Players[0].Stats = &enginev1.PlayerStats{Points: 3, Saves: 1, Stuns: 9}
+		_ = w.WriteFrame(f)
+		time.Sleep(120 * time.Millisecond)
+	}
+	time.Sleep(3 * time.Second) // reconnect backoff starts at 1s
+
+	// Walk the wire in order: after the SECOND header, the first frame must
+	// carry a PlayerStatsUpdated for slot 0 with the live counters.
+	headers := 0
+	var firstFrameAfterReconnect *capturepb.Frame
+	for i, m := range srv.messages() {
+		env := parseIngestEnvelope(t, m.data)
+		if env.GetHeader() != nil {
+			headers++
+			continue
+		}
+		if f := env.GetFrame(); f != nil && headers >= 2 && firstFrameAfterReconnect == nil {
+			firstFrameAfterReconnect = f
+			t.Logf("first frame after reconnect is message %d, frame_index %d", i, f.GetFrameIndex())
+		}
+	}
+	if headers < 2 {
+		t.Fatalf("saw %d headers; the reconnect never happened, so this test measured nothing", headers)
+	}
+	if firstFrameAfterReconnect == nil {
+		t.Fatalf("no frame followed the second header")
+	}
+	var got *capturepb.PlayerStatsUpdated
+	for _, e := range firstFrameAfterReconnect.GetEchoArena().GetEvents() {
+		if su := e.GetPlayerStatsUpdated(); su != nil && su.GetPlayerSlot() == 0 {
+			got = su
+		}
+	}
+	if got == nil {
+		t.Fatalf("first frame after reconnect carries no PlayerStatsUpdated for slot 0 -- " +
+			"the mapper kept its pre-reconnect state, so the new session has names and no numbers")
+	}
+	if got.GetPoints() != 3 || got.GetSaves() != 1 || got.GetStuns() != 9 {
+		t.Errorf("re-seeded stats = points %d saves %d stuns %d, want 3/1/9",
+			got.GetPoints(), got.GetSaves(), got.GetStuns())
+	}
+}

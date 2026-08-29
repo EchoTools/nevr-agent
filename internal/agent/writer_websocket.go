@@ -522,6 +522,18 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		}
 		w.mu.Unlock()
 		w.logger.Debug("Sent capture header", zap.Uint64("conn_epoch", epoch))
+
+		// A new connection is a new session on the server -- a fresh tape file
+		// and fresh spectators -- so the mapper's delta state must start over:
+		// tape's FrameMapper emits PlayerStatsUpdated, LoadoutChanged and
+		// GrabChanged on FIRST SIGHTING and then only on change. Carried across a
+		// reconnect it sends a header and then frames with no baseline, and a
+		// server restarted mid-match shows every spectator names and no numbers
+		// until the next match (measured on the rig, 2026-08-28). RoundNumber is
+		// match state rather than delta state and survives the reset.
+		rn := mapper.RoundNumber
+		mapper.Reset()
+		mapper.RoundNumber = rn
 	}
 
 	v2frame, err := mapper.MapFrame(frame)
