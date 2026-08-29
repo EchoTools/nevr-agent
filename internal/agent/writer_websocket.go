@@ -84,6 +84,11 @@ type WebSocketWriter struct {
 	header      *capturepb.CaptureHeader
 	frameCount  uint32
 	lastTsMs    uint32
+	// captureSessionID is the game `sessionid` the current header and mapper are
+	// for. A frame arriving with a DIFFERENT one is a new match begun on the same
+	// connection -- back-to-back matches with no >5s /session gap, so the poller
+	// never timed out and this writer was never re-created. See sendFrame.
+	captureSessionID string
 
 	// Disk buffer state
 	diskBufferMu    sync.Mutex
@@ -480,6 +485,30 @@ func (w *WebSocketWriter) writeEnvelope(conn *websocket.Conn, env *capturepb.Env
 // path writer_tape.go uses (MapHeaderFromSession + FrameMapper), so the socket
 // and the .tape file carry identical captures rather than two dialects.
 func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.LobbySessionStateFrame) error {
+	// Detect a new match on the SAME connection before anything else. A real
+	// gameserver serving match B right after match A, with no /session gap long
+	// enough to time out the poller, keeps this one writer alive across both --
+	// so without this, B's frames ride A's header and nevr-stream attributes
+	// them to A's match_id, which never gets a footer (measured 2026-08-28).
+	sid := frame.GetSession().GetSessionId()
+	w.mu.Lock()
+	oldSID := w.captureSessionID
+	sessionChanged := w.mapper != nil && sid != "" && oldSID != "" && sid != oldSID
+	w.mu.Unlock()
+	if sessionChanged {
+		w.logger.Info("session changed on a live connection; closing the old capture and starting a new one",
+			zap.String("old_session", oldSID), zap.String("new_session", sid))
+		w.sendFooter() // footers the OLD capture from its frameCount/lastTsMs
+		w.mu.Lock()
+		w.mapper = nil
+		w.header = nil
+		w.frameCount = 0
+		w.lastTsMs = 0
+		w.headerEpoch = 0 // force a header for the new capture (connEpoch >= 1 once connected)
+		w.captureSessionID = ""
+		w.mu.Unlock()
+	}
+
 	w.mu.Lock()
 	needHeader := w.headerEpoch != w.connEpoch
 	epoch := w.connEpoch
@@ -501,6 +530,7 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		w.mu.Lock()
 		w.header = header
 		w.mapper = mapper
+		w.captureSessionID = frame.GetSession().GetSessionId()
 		w.mu.Unlock()
 	}
 

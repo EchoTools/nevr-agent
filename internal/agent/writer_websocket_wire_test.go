@@ -322,3 +322,68 @@ func TestWebSocketWriter_ReseedsBaselineAfterReconnect(t *testing.T) {
 			got.GetPoints(), got.GetSaves(), got.GetStuns())
 	}
 }
+
+// TestWebSocketWriter_NewSessionOnSameConnectionSplitsTheCapture covers the
+// merge bug measured on the rig 2026-08-28: a gameserver serving match B right
+// after match A (new sessionid, no /session gap) keeps ONE poller and ONE
+// writer alive across both, so B's frames used to ride A's header and land under
+// A's match_id on nevr-stream, with A never footered. The writer must instead
+// footer A and send a fresh header for B, on the same connection.
+func TestWebSocketWriter_NewSessionOnSameConnectionSplitsTheCapture(t *testing.T) {
+	srv := newWireServer(t, 0)
+	w := NewWebSocketWriter(testLogger(t), srv.wsURL(), "")
+	if err := w.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	base := time.Date(2026, 8, 28, 21, 0, 0, 0, time.UTC)
+	// Match A: 3 frames, session "sess-A".
+	for i := 0; i < 3; i++ {
+		_ = w.WriteFrame(makeRosterFrame("sess-A", uint32(i), base.Add(time.Duration(i)*100*time.Millisecond)))
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Match B on the SAME connection: 3 frames, session "sess-B".
+	for i := 0; i < 3; i++ {
+		_ = w.WriteFrame(makeRosterFrame("sess-B", uint32(i), base.Add(time.Duration(10+i)*100*time.Millisecond)))
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(120 * time.Millisecond)
+	w.Close()
+	time.Sleep(120 * time.Millisecond)
+
+	// Walk the wire in order and attribute every frame to the header that
+	// precedes it. The bug is a frame of B's sitting under A's header.
+	var curSession string
+	headers := map[string]int{}
+	framesUnder := map[string]int{}
+	footersAfter := map[string]int{}
+	for _, m := range srv.messages() {
+		if m.messageType != websocket.BinaryMessage {
+			t.Fatalf("non-binary message on the wire")
+		}
+		env := parseIngestEnvelope(t, m.data)
+		switch {
+		case env.GetHeader() != nil:
+			curSession = env.GetHeader().GetEchoArena().GetSessionId()
+			headers[curSession]++
+		case env.GetFrame() != nil:
+			framesUnder[curSession]++
+		case env.GetFooter() != nil:
+			footersAfter[curSession]++
+		}
+	}
+
+	// Two distinct headers, one per session.
+	if headers["sess-A"] != 1 || headers["sess-B"] != 1 {
+		t.Fatalf("headers per session = %v, want exactly one each -- a new match on the same connection got no header of its own", headers)
+	}
+	// Every A-frame under A's header, every B-frame under B's header. Before the
+	// fix, B's frames were counted under sess-A.
+	if framesUnder["sess-A"] != 3 || framesUnder["sess-B"] != 3 {
+		t.Fatalf("frames per session = %v, want 3 each -- a frame was attributed to the wrong match", framesUnder)
+	}
+	// A must be footered (its match ended) before B's frames.
+	if footersAfter["sess-A"] < 1 {
+		t.Fatalf("no footer closed match sess-A before sess-B began; footers = %v", footersAfter)
+	}
+}
