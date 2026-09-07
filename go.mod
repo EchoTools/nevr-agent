@@ -3,7 +3,7 @@ module github.com/echotools/nevr-agent/v4
 go 1.26.0
 
 require (
-	buf.build/gen/go/echotools/nevr-api/protocolbuffers/go v1.36.12-20260826145031-f5ec961c025e.1
+	buf.build/gen/go/echotools/nevr-api/protocolbuffers/go v1.36.12-20260907104457-638a4669f605.2
 	github.com/echotools/tape/v4 v4.0.0
 	github.com/google/go-cmp v0.7.0
 	github.com/joho/godotenv v1.5.1

@@ -57,7 +57,11 @@ func TestCLIVersion(t *testing.T) {
 
 // TestCLISubcommandHelp verifies that subcommand help works
 func TestCLISubcommandHelp(t *testing.T) {
-	subcommands := []string{"stream", "convert", "replay", "serve"}
+	// "serve" was removed in a371463 when the API server moved to nevr-stream;
+	// this list kept asserting it and was red-but-invisible behind a build
+	// failure until 2026-09-07. Live commands: check-update, convert, replay,
+	// show, stream.
+	subcommands := []string{"stream", "convert", "replay", "show"}
 
 	for _, subcmd := range subcommands {
 		t.Run(subcmd, func(t *testing.T) {

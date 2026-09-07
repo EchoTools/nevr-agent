@@ -619,7 +619,12 @@ func outputTapeSummary(stats map[string]int, frameCount int, durationMs uint32, 
 	if eaHeader := header.GetEchoArena(); eaHeader != nil {
 		fmt.Printf("Session ID: %s\n", eaHeader.GetSessionId())
 		fmt.Printf("Map: %s\n", eaHeader.GetMapName())
-		fmt.Printf("Match type: %s\n", eaHeader.GetMatchType().String())
+	}
+	// game_type is on CaptureHeader, not EchoArenaHeader: it names the mode for
+	// any game, and it is the engine's own symbol as a string rather than an
+	// enum, so it prints verbatim.
+	if header.GetGameType() != "" {
+		fmt.Printf("Game type: %s\n", header.GetGameType())
 	}
 	if header.GetCaptureId() != "" {
 		fmt.Printf("Capture ID: %s\n", header.GetCaptureId())
