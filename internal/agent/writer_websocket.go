@@ -38,12 +38,16 @@ const (
 
 // WebSocketWriter implements FrameWriter and streams frames to the API server over WebSocket.
 type WebSocketWriter struct {
-	logger     *zap.Logger
-	socketURL  string
-	jwtToken   string
-	ctx        context.Context
-	cancel     context.CancelFunc
-	conn       *websocket.Conn
+	logger    *zap.Logger
+	socketURL string
+	jwtToken  string
+	ctx       context.Context
+	cancel    context.CancelFunc
+	conn      *websocket.Conn
+	// connCancel ends the loops (readLoop, writeLoop) started for the CURRENT
+	// conn. Every connection gets its own, so replacing a conn retires exactly
+	// the goroutines that belonged to it.
+	connCancel context.CancelFunc
 	mu         sync.Mutex
 	outgoingCh chan *telemetry.LobbySessionStateFrame
 	stopped    bool
@@ -55,13 +59,7 @@ type WebSocketWriter struct {
 	// permits one concurrent writer and panics ("concurrent write to websocket
 	// connection") otherwise, killing the process. Three writers can reach one
 	// connection here: the ping ticker, the frame path, and the footer written
-	// from Close(). A fourth arrives on its own: connectLocked starts a fresh
-	// readLoop/writeLoop/reconnectLoop on EVERY reconnect without stopping the
-	// previous set, so after N reconnects there are N writeLoops sharing w.conn
-	// (visible in a reconnect test as duplicated "Attempting to reconnect" lines
-	// and a connEpoch that jumps by more than one). That goroutine
-	// multiplication predates this change and is NOT fixed here; this mutex
-	// stops it from being a crash.
+	// from Close().
 	writeMu sync.Mutex
 
 	// Reconnection state
@@ -175,17 +173,21 @@ func (w *WebSocketWriter) connectLocked() error {
 		return fmt.Errorf("failed to dial websocket: %w", err)
 	}
 
+	connCtx, connCancel := context.WithCancel(w.ctx)
 	w.conn = conn
+	w.connCancel = connCancel
 	w.connected = true
 	w.connEpoch++
 
 	w.logger.Debug("WebSocket connection established, starting background routines", zap.String("url", u.String()))
 
-	// Start the per-connection routines. readLoop and writeLoop are per-connection
-	// by design: both return when their conn fails, and the next connect replaces
-	// them. reconnectLoop is NOT started here -- see Connect.
-	go w.readLoop()
-	go w.writeLoop()
+	// Start the per-connection routines. Both are bound to THIS conn: they act
+	// only while it is still w.conn, and exit when connCtx is cancelled (the next
+	// reconnect or Close). A loop that outlived its conn must never mark its
+	// successor disconnected or trigger a reconnect. reconnectLoop is NOT
+	// started here -- see Connect.
+	go w.readLoop(conn, connCtx)
+	go w.writeLoop(conn, connCtx)
 
 	return nil
 }
@@ -197,6 +199,22 @@ func (w *WebSocketWriter) triggerReconnect() {
 	default:
 		// Reconnect already pending
 	}
+}
+
+// connLost records that conn failed and asks for a reconnect -- but only if conn
+// is still the current connection. A loop belonging to a connection that has
+// already been replaced reports nothing: its failure says nothing about the
+// healthy connection that superseded it.
+func (w *WebSocketWriter) connLost(conn *websocket.Conn) {
+	w.mu.Lock()
+	if w.conn != conn {
+		w.mu.Unlock()
+		return
+	}
+	w.connected = false
+	w.disconnectedAt = time.Now()
+	w.mu.Unlock()
+	w.triggerReconnect()
 }
 
 // reconnectLoop handles automatic reconnection with exponential backoff
@@ -225,7 +243,12 @@ func (w *WebSocketWriter) reconnectLoop() {
 					return
 				}
 
-				// Close existing connection if any
+				// Retire the old connection and its loops. Cancel first so the
+				// old readLoop, woken by the Close, sees it is superseded.
+				if w.connCancel != nil {
+					w.connCancel()
+					w.connCancel = nil
+				}
 				if w.conn != nil {
 					w.conn.Close()
 					w.conn = nil
@@ -310,41 +333,32 @@ func (w *WebSocketWriter) IsStopped() bool {
 	return w.stopped
 }
 
-func (w *WebSocketWriter) readLoop() {
+func (w *WebSocketWriter) readLoop(conn *websocket.Conn, connCtx context.Context) {
 	defer func() {
 		w.logger.Debug("Read loop stopped")
 	}()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-connCtx.Done():
 			return
 		default:
 		}
 
-		w.mu.Lock()
-		conn := w.conn
-		w.mu.Unlock()
-
-		if conn == nil {
-			// No connection, wait a bit and check again
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			select {
+			case <-connCtx.Done():
+				return // superseded or closing: this error is ours, not news
+			default:
+			}
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				w.logger.Info("WebSocket closed normally")
 			} else if !strings.Contains(err.Error(), "use of closed network connection") {
 				w.logger.Warn("WebSocket read error, triggering reconnect", zap.Error(err))
 			}
 
-			w.mu.Lock()
-			w.connected = false
-			w.mu.Unlock()
-
-			w.triggerReconnect()
+			w.connLost(conn)
 			return
 		}
 
@@ -360,11 +374,15 @@ func (w *WebSocketWriter) readLoop() {
 	}
 }
 
-func (w *WebSocketWriter) writeLoop() {
+func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Context) {
 	ticker := time.NewTicker(50 * time.Second) // Keep-alive ping
 	defer func() {
 		ticker.Stop()
-		w.cleanupDiskBuffer()
+		if w.ctx.Err() != nil {
+			// Only on shutdown: a superseded writeLoop must not delete the
+			// disk buffer the new connection is about to drain.
+			w.cleanupDiskBuffer()
+		}
 		w.logger.Debug("Write loop stopped")
 	}()
 
@@ -376,16 +394,16 @@ func (w *WebSocketWriter) writeLoop() {
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-connCtx.Done():
 			return
 
 		case <-ticker.C:
 			w.mu.Lock()
-			conn := w.conn
+			current := w.conn == conn
 			connected := w.connected
 			w.mu.Unlock()
 
-			if !connected || conn == nil {
+			if !connected || !current {
 				continue
 			}
 
@@ -394,22 +412,29 @@ func (w *WebSocketWriter) writeLoop() {
 			w.writeMu.Unlock()
 			if err != nil {
 				w.logger.Warn("Failed to send ping, triggering reconnect", zap.Error(err))
-				w.mu.Lock()
-				w.connected = false
-				w.disconnectedAt = time.Now()
-				w.mu.Unlock()
-				w.triggerReconnect()
+				w.connLost(conn)
 				return
 			}
 
 		case frame := <-w.outgoingCh:
 			w.mu.Lock()
-			conn := w.conn
+			current := w.conn == conn
 			connected := w.connected
 			disconnectedAt := w.disconnectedAt
 			w.mu.Unlock()
 
-			if !connected || conn == nil {
+			if !current {
+				// Superseded between the select and here: hand the frame to
+				// the loop that owns the live connection.
+				select {
+				case w.outgoingCh <- frame:
+				default:
+					w.logger.Warn("Dropping frame while superseded, buffer full")
+				}
+				return
+			}
+
+			if !connected {
 				// Check if we should switch to disk buffering
 				if !disconnectedAt.IsZero() && time.Since(disconnectedAt) > diskBufferThreshold {
 					if err := w.bufferToDisk(frame, &marshaler); err != nil {
@@ -436,11 +461,7 @@ func (w *WebSocketWriter) writeLoop() {
 
 			if err := w.sendFrame(conn, frame); err != nil {
 				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
-				w.mu.Lock()
-				w.connected = false
-				w.disconnectedAt = time.Now()
-				w.mu.Unlock()
-				w.triggerReconnect()
+				w.connLost(conn)
 				return
 			}
 		}
