@@ -207,7 +207,11 @@ func (w *WebSocketWriter) triggerReconnect() {
 // healthy connection that superseded it.
 func (w *WebSocketWriter) connLost(conn *websocket.Conn) {
 	w.mu.Lock()
-	if w.conn != conn {
+	if w.conn != conn || !w.connected {
+		// Superseded, or already reported lost: the readLoop and writeLoop of
+		// one dead conn both land here, and only the first may queue a
+		// reconnect. A second signal would outlive the reconnect it duplicates
+		// and tear down the healthy replacement.
 		w.mu.Unlock()
 		return
 	}
@@ -752,11 +756,7 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 		}
 		if err := w.sendFrame(conn, bf); err != nil {
 			w.logger.Warn("Failed to send buffered frame, will retry on next reconnect", zap.Error(err))
-			w.mu.Lock()
-			w.connected = false
-			w.disconnectedAt = time.Now()
-			w.mu.Unlock()
-			w.triggerReconnect()
+			w.connLost(conn)
 			return
 		}
 
