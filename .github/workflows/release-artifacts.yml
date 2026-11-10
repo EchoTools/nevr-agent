@@ -28,9 +28,9 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: true
 
       - name: Get version from tag
@@ -83,7 +83,7 @@ jobs:
           fi
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.ARTIFACT }}
         env:

@@ -16,9 +16,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: Build binary
         run: |
           VERSION=$(git describe --tags --match 'v[0-9]*' --long --always --dirty --abbrev=7 2>/dev/null || echo v0.0.0-0-g0000000)
@@ -47,7 +47,7 @@ jobs:
       - name: List files
         run: ls -l ./artifacts
       - name: Upload release assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ./artifacts/**/agent*
