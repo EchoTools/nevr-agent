@@ -142,6 +142,38 @@ func (w *WebSocketWriter) Connect() error {
 	return nil
 }
 
+// ConnectWithRetry is Connect for the start of a match: a refused first dial is
+// not final. It dials once; if that fails it hands the writer to the same
+// reconnectLoop that recovers a dropped connection (same backoff, same
+// supervisor), so there is one retry implementation, not two. It returns an
+// error only for a URL that can never dial.
+//
+// Frames written before the connection is up wait in outgoingCh, bounded by
+// memoryBufferSize (the writeLoop that drains it starts with the connection, so
+// the disk buffer is not engaged before the first connect). When the channel is
+// full WriteFrame drops the NEWEST frame and returns an error, as it does for a
+// dropped connection.
+func (w *WebSocketWriter) ConnectWithRetry() error {
+	if _, err := url.Parse(w.socketURL); err != nil {
+		return fmt.Errorf("invalid socket URL: %w", err)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	err := w.connectLocked()
+	if !w.supervising {
+		w.supervising = true
+		go w.reconnectLoop()
+	}
+	if err != nil {
+		w.logger.Warn("Initial WebSocket dial failed, retrying with backoff", zap.Error(err))
+		w.disconnectedAt = time.Now()
+		w.triggerReconnect()
+	}
+	return nil
+}
+
 // connectLocked establishes the WebSocket connection (must be called with lock held)
 func (w *WebSocketWriter) connectLocked() error {
 	if w.connected {
