@@ -35,7 +35,15 @@ const (
 	catchUpBatchSize     = 100                   // Frames to send per batch when catching up
 	catchUpBatchInterval = 10 * time.Millisecond // Delay between catch-up batches
 	dropLogInterval      = 30 * time.Second      // Min gap between "frames dropped" log lines
+	diskSizeLogInterval  = time.Minute           // Gap between disk buffer size log lines
 )
+
+// maxDiskBufferBytes caps the disk buffer. At the cap further frames are NOT
+// written: they are dropped (oldest kept, so the replay stays contiguous from the
+// start of the outage) and counted/logged through noteDrop. A multi-hour outage
+// therefore cannot fill the temp disk unseen. The size is also logged once a
+// minute while buffering. A var so tests can lower it.
+var maxDiskBufferBytes int64 = 512 << 20
 
 // WebSocketWriter implements FrameWriter and streams frames to the API server over WebSocket.
 type WebSocketWriter struct {
@@ -105,6 +113,16 @@ type WebSocketWriter struct {
 	diskBufferPath  string
 	usingDiskBuffer bool
 	diskFrameCount  int64
+	diskBytes       int64     // bytes in the current buffer file
+	diskSizeLogged  time.Time // last periodic size log
+	// drainConsumed is how many lines of the current buffer file earlier drains
+	// already sent (or skipped as unparseable). A drain aborted mid-file resumes
+	// after them, so the next server-side piece is exactly k+1..N instead of
+	// re-sending 1..k (nevr-stream would store the match as two overlapping tapes).
+	drainConsumed int64
+
+	// replayHook, when set (tests), is called after each replayed frame is sent.
+	replayHook func(consumed int64, conn *websocket.Conn)
 }
 
 // NewWebSocketWriter creates a new WebSocketWriter.
@@ -183,6 +201,11 @@ func (w *WebSocketWriter) Connect() error {
 // still be dropped only if the disk buffer cannot be written, or outgoingCh
 // fills faster than the spool or the replay drain it; every such drop goes
 // through noteDrop (logged on the first, then periodically, with a count).
+//
+// The spool is capped at maxDiskBufferBytes (size logged every minute; at the
+// cap frames are dropped and counted). Close deletes a spool that was never
+// replayed: the file writers (tape/nevrcap) still hold those frames, so the
+// spool is a best-effort live-stream backlog, not the record of the match.
 func (w *WebSocketWriter) ConnectWithRetry() error {
 	if _, err := url.Parse(w.socketURL); err != nil {
 		return fmt.Errorf("invalid socket URL: %w", err)
@@ -568,7 +591,7 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 				select {
 				case w.outgoingCh <- frame:
 				default:
-					w.logger.Warn("Dropping frame while superseded, buffer full")
+					w.noteDrop("superseded, buffer full")
 				}
 				return
 			}
@@ -577,14 +600,14 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 				// Check if we should switch to disk buffering
 				if !disconnectedAt.IsZero() && time.Since(disconnectedAt) > diskBufferThreshold {
 					if err := w.bufferToDisk(frame, &marshaler); err != nil {
-						w.logger.Warn("Failed to buffer frame to disk", zap.Error(err))
+						w.noteDrop("disk buffer write failed: " + err.Error())
 					}
 				} else {
 					// Still in memory buffer phase, re-queue the frame
 					select {
 					case w.outgoingCh <- frame:
 					default:
-						w.logger.Warn("Dropping frame while disconnected, buffer full")
+						w.noteDrop("disconnected, buffer full")
 					}
 				}
 				time.Sleep(100 * time.Millisecond)
@@ -709,6 +732,10 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		// this header was actually written for.
 		if w.connEpoch == epoch {
 			w.headerEpoch = epoch
+			// A header opens a new piece on the server; its footer must count
+			// its own frames, not the previous connection's.
+			w.frameCount = 0
+			w.lastTsMs = 0
 		}
 		w.mu.Unlock()
 		w.logger.Debug("Sent capture header", zap.Uint64("conn_epoch", epoch))
@@ -731,8 +758,9 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		// A frame that cannot be mapped is dropped rather than killing the
 		// connection: the error is per-frame (timestamp offset overflow), not
 		// per-stream, and taking the socket down would lose the whole capture.
-		w.logger.Error("Failed to map frame to v2, dropping it", zap.Error(err),
+		w.logger.Debug("Failed to map frame to v2", zap.Error(err),
 			zap.Uint32("frame_index", frame.GetFrameIndex()))
+		w.noteDrop("frame could not be mapped to v2: " + err.Error())
 		return nil
 	}
 
@@ -781,6 +809,10 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 	w.diskBufferMu.Lock()
 	defer w.diskBufferMu.Unlock()
 
+	if w.diskBytes >= maxDiskBufferBytes {
+		return fmt.Errorf("disk buffer at its %d-byte cap", maxDiskBufferBytes)
+	}
+
 	// Create disk buffer file if not exists
 	if w.diskBufferFile == nil {
 		f, err := os.CreateTemp("", "nevr-frame-buffer-*.jsonl")
@@ -791,6 +823,8 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 		w.diskBufferPath = f.Name()
 		w.usingDiskBuffer = true
 		w.diskFrameCount = 0
+		w.diskBytes = 0
+		w.drainConsumed = 0
 		w.logger.Info("Started disk buffering", zap.String("path", w.diskBufferPath))
 	}
 
@@ -815,8 +849,12 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 	}
 
 	w.diskFrameCount++
-	if w.diskFrameCount%100 == 0 {
-		w.logger.Debug("Disk buffer progress", zap.Int64("frames_buffered", w.diskFrameCount))
+	w.diskBytes += int64(len(data)) + 1
+	if time.Since(w.diskSizeLogged) >= diskSizeLogInterval {
+		w.diskSizeLogged = time.Now()
+		w.logger.Info("Disk buffer size",
+			zap.Int64("frames_buffered", w.diskFrameCount), zap.Int64("bytes", w.diskBytes),
+			zap.Int64("cap_bytes", maxDiskBufferBytes))
 	}
 
 	return nil
@@ -853,7 +891,16 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 	sentCount := int64(0)
 	batchCount := 0
 
+	w.diskBufferMu.Lock()
+	skip := w.drainConsumed
+	w.diskBufferMu.Unlock()
+	consumed := int64(0)
+
 	for scanner.Scan() {
+		if consumed < skip {
+			consumed++ // sent by an earlier, aborted drain
+			continue
+		}
 		select {
 		case <-w.ctx.Done():
 			w.logger.Warn("Context cancelled during disk buffer drain")
@@ -870,6 +917,7 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 		if !connected || conn == nil {
 			w.logger.Warn("Connection lost during disk buffer drain, aborting")
 			// Don't clean up - keep the buffer for next reconnect
+			w.keepAfterAbort(consumed)
 			return
 		}
 
@@ -882,18 +930,25 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 		// one, exactly like a live frame.
 		var buffered telemetry.Envelope
 		if err := protojson.Unmarshal(scanner.Bytes(), &buffered); err != nil {
-			w.logger.Warn("Skipping unparseable buffered frame", zap.Error(err))
+			w.logger.Debug("Skipping unparseable buffered frame", zap.Error(err))
+			w.noteDrop("unparseable buffered frame")
+			consumed++
 			continue
 		}
 		bf := buffered.GetFrame()
 		if bf == nil {
+			consumed++
 			continue
 		}
 		if err := w.sendFrame(conn, bf); err != nil {
 			w.logger.Warn("Failed to send buffered frame, will retry on next reconnect", zap.Error(err))
-			w.reopenDiskBuffer()
+			w.keepAfterAbort(consumed)
 			w.connLost(conn)
 			return
+		}
+		consumed++
+		if w.replayHook != nil {
+			w.replayHook(consumed, conn)
 		}
 
 		sentCount++
@@ -914,12 +969,14 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 	w.cleanupDiskBuffer()
 }
 
-// reopenDiskBuffer reopens a kept buffer for appending after an aborted drain
-// closed its write handle, so the spool can keep adding to it. The next drain
-// replays the whole file onto the new connection (a new server-side session).
-func (w *WebSocketWriter) reopenDiskBuffer() {
+// keepAfterAbort keeps the buffer after an aborted drain: it records how many
+// lines were consumed, so the next drain resumes after them, and reopens the
+// file for appending (the drain closed its write handle) so the spool can keep
+// adding to it.
+func (w *WebSocketWriter) keepAfterAbort(consumed int64) {
 	w.diskBufferMu.Lock()
 	defer w.diskBufferMu.Unlock()
+	w.drainConsumed = consumed
 	if !w.usingDiskBuffer || w.diskBufferPath == "" {
 		return
 	}
@@ -952,4 +1009,6 @@ func (w *WebSocketWriter) cleanupDiskBuffer() {
 
 	w.usingDiskBuffer = false
 	w.diskFrameCount = 0
+	w.diskBytes = 0
+	w.drainConsumed = 0
 }
