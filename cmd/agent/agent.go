@@ -210,7 +210,6 @@ func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
 }
 
 func startAgent(ctx context.Context, logger *zap.Logger, targets map[string][]int, streamCfg StreamConfig) {
-	baseLogger := logger // Keep reference to base logger for WebSocket writer
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
@@ -329,7 +328,7 @@ OuterLoop:
 				if streamCfg.EventsStream {
 					wsURL := streamCfg.EventsURL
 					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
-					wsWriter := agent.NewWebSocketWriter(baseLogger, wsURL, token)
+					wsWriter := agent.NewWebSocketWriter(logger, wsURL, token)
 					// A refused first dial is retried with backoff by the writer; only an
 					// unusable URL drops the writer.
 					if err := wsWriter.ConnectWithRetry(); err != nil {

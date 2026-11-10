@@ -88,3 +88,34 @@ func TestWatchTokenExpiry_ErrorsEveryIntervalOnceExpired(t *testing.T) {
 		t.Errorf("got %d error entries, want at least 3 (start + repeats)", errs)
 	}
 }
+
+// A token valid at start that expires mid-run -- the recorder's case -- must
+// start erroring once it passes exp, and not before.
+func TestWatchTokenExpiry_ErrorsAfterMidRunExpiry(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	exp := time.Now().Add(2 * time.Second) // exp is whole seconds: expires 1-2 s from now
+	go func() {
+		watchTokenExpiry(ctx, zap.New(core), jwtExp(exp), 20*time.Millisecond)
+		close(done)
+	}()
+	time.Sleep(500 * time.Millisecond)
+	for _, e := range logs.All() {
+		if e.Level == zapcore.ErrorLevel {
+			t.Fatal("error logged before the token expired")
+		}
+	}
+	time.Sleep(2200 * time.Millisecond)
+	cancel()
+	<-done
+	errs := 0
+	for _, e := range logs.All() {
+		if e.Level == zapcore.ErrorLevel {
+			errs++
+		}
+	}
+	if errs < 2 {
+		t.Errorf("got %d error entries after mid-run expiry, want at least 2", errs)
+	}
+}

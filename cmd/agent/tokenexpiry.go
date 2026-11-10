@@ -61,11 +61,24 @@ func checkTokenExpiry(logger *zap.Logger, token string, now time.Time) (expired 
 	return false
 }
 
-// watchTokenExpiry checks the token at start and, if it is expired, logs an
-// ERROR every interval until ctx ends. A live token is not re-logged.
+// watchTokenExpiry checks the token at start. If it is already expired it logs
+// an ERROR every interval until ctx ends; if it is still valid it waits (ctx-
+// aware) until exp and then does the same, so a token that expires mid-run is
+// reported. A live token is not re-logged.
 func watchTokenExpiry(ctx context.Context, logger *zap.Logger, token string, interval time.Duration) {
 	if !checkTokenExpiry(logger, token, time.Now()) {
-		return
+		exp, ok, err := jwtExpiry(token)
+		if err != nil || !ok {
+			return // nothing to wait for; already warned
+		}
+		timer := time.NewTimer(time.Until(exp))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		checkTokenExpiry(logger, token, time.Now())
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
