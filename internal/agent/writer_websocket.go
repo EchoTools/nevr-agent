@@ -34,7 +34,16 @@ const (
 	diskBufferThreshold  = 3 * time.Second       // Start disk buffering after this duration
 	catchUpBatchSize     = 100                   // Frames to send per batch when catching up
 	catchUpBatchInterval = 10 * time.Millisecond // Delay between catch-up batches
+	dropLogInterval      = 30 * time.Second      // Min gap between "frames dropped" log lines
+	diskSizeLogInterval  = time.Minute           // Gap between disk buffer size log lines
 )
+
+// maxDiskBufferBytes caps the disk buffer. At the cap further frames are NOT
+// written: they are dropped (oldest kept, so the replay stays contiguous from the
+// start of the outage) and counted/logged through noteDrop. A multi-hour outage
+// therefore cannot fill the temp disk unseen. The size is also logged once a
+// minute while buffering. A var so tests can lower it.
+var maxDiskBufferBytes int64 = 512 << 20
 
 // WebSocketWriter implements FrameWriter and streams frames to the API server over WebSocket.
 type WebSocketWriter struct {
@@ -54,6 +63,11 @@ type WebSocketWriter struct {
 	connected  bool
 	// supervising guards the single reconnectLoop; see Connect.
 	supervising bool
+	// dialNow makes the supervisor's next round dial immediately instead of
+	// sleeping the backoff first (set by ConnectWithRetry for the first dial).
+	dialNow bool
+	// supervisorDone is closed when reconnectLoop returns.
+	supervisorDone chan struct{}
 
 	// writeMu serialises EVERY conn.Write* in this file. gorilla/websocket
 	// permits one concurrent writer and panics ("concurrent write to websocket
@@ -88,12 +102,27 @@ type WebSocketWriter struct {
 	// never timed out and this writer was never re-created. See sendFrame.
 	captureSessionID string
 
+	// Drop accounting: see noteDrop.
+	dropMu      sync.Mutex
+	dropped     uint64
+	lastDropLog time.Time
+
 	// Disk buffer state
 	diskBufferMu    sync.Mutex
 	diskBufferFile  *os.File
 	diskBufferPath  string
 	usingDiskBuffer bool
 	diskFrameCount  int64
+	diskBytes       int64     // bytes in the current buffer file
+	diskSizeLogged  time.Time // last periodic size log
+	// drainConsumed is how many lines of the current buffer file earlier drains
+	// already sent (or skipped as unparseable). A drain aborted mid-file resumes
+	// after them, so the next server-side piece is exactly k+1..N instead of
+	// re-sending 1..k (nevr-stream would store the match as two overlapping tapes).
+	drainConsumed int64
+
+	// replayHook, when set (tests), is called after each replayed frame is sent.
+	replayHook func(consumed int64, conn *websocket.Conn)
 }
 
 // NewWebSocketWriter creates a new WebSocketWriter.
@@ -109,32 +138,47 @@ func NewWebSocketWriter(logger *zap.Logger, socketURL, jwtToken string) *WebSock
 		outgoingCh:  make(chan *telemetry.LobbySessionStateFrame, memoryBufferSize),
 		stopped:     false,
 		reconnectCh: make(chan struct{}, 1),
+
+		supervisorDone: make(chan struct{}),
 	}
 
 	return w
 }
 
-// Connect establishes the WebSocket connection and starts the single supervisor.
+// Connect dials once, synchronously, and starts the single supervisor.
 //
-// reconnectLoop is started HERE, exactly once, rather than in connectLocked.
-// connectLocked is what reconnectLoop calls to re-dial, so starting a supervisor
-// from inside it meant every reconnect spawned another supervisor, each of which
-// spawned another on its next reconnect -- geometric growth, and with it multiple
-// readLoops calling ReadMessage on one connection. gorilla permits ONE concurrent
-// reader and one concurrent writer; the race detector reports the read side as
-// ten DATA RACEs inside Conn.NextReader across a single reconnect test, and the
-// write side is what writeMu now covers.
+// reconnectLoop is started HERE (or by ConnectWithRetry), exactly once, rather
+// than when a connection is installed. reconnectLoop is what re-dials, so
+// starting a supervisor from inside it meant every reconnect spawned another
+// supervisor, each of which spawned another on its next reconnect -- geometric
+// growth, and with it multiple readLoops calling ReadMessage on one connection.
+// gorilla permits ONE concurrent reader and one concurrent writer; the write
+// side is what writeMu covers. The per-connection loops still respawn, because
+// they must -- they return when their own connection dies.
 //
-// This is the minimum fix for that: one supervisor, so nothing multiplies. The
-// per-connection loops still respawn, because they must -- they return when their
-// own connection dies.
+// The dial happens OUTSIDE w.mu: w.mu is taken by IsStopped, which is on every
+// WriteFrame, and a dial can take the full 45 s handshake timeout.
 func (w *WebSocketWriter) Connect() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	if w.connected {
+		w.mu.Unlock()
+		return nil
+	}
+	w.mu.Unlock()
 
-	if err := w.connectLocked(); err != nil {
+	conn, err := w.dial()
+	if err != nil {
 		return err
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		conn.Close()
+		return fmt.Errorf("writer is stopped")
+	}
+	connCtx := w.installLocked(conn)
+	w.startLoops(conn, connCtx)
 	if !w.supervising {
 		w.supervising = true
 		go w.reconnectLoop()
@@ -142,16 +186,49 @@ func (w *WebSocketWriter) Connect() error {
 	return nil
 }
 
-// connectLocked establishes the WebSocket connection (must be called with lock held)
-func (w *WebSocketWriter) connectLocked() error {
-	if w.connected {
-		return nil
+// ConnectWithRetry is Connect for the start of a match: a refused or blackholed
+// first dial is not final, and it never blocks the caller. It starts the same
+// reconnectLoop that recovers a dropped connection (same backoff, same
+// supervisor -- one retry implementation, not two) with its first dial
+// immediate. It returns an error only for a URL that can never dial.
+//
+// Drop policy: NO frame is dropped before the first connect, or while
+// reconnecting. From the moment the supervisor starts a round until the
+// connection is up, a spool goroutine moves frames from outgoingCh to the disk
+// buffer (the same one a dropped connection uses); on connect the buffer is
+// replayed, in order, before the live loops start, so an outage longer than
+// memoryBufferSize frames is bounded by disk, not by 1000 frames. A frame can
+// still be dropped only if the disk buffer cannot be written, or outgoingCh
+// fills faster than the spool or the replay drain it; every such drop goes
+// through noteDrop (logged on the first, then periodically, with a count).
+//
+// The spool is capped at maxDiskBufferBytes (size logged every minute; at the
+// cap frames are dropped and counted). Close deletes a spool that was never
+// replayed: the file writers (tape/nevrcap) still hold those frames, so the
+// spool is a best-effort live-stream backlog, not the record of the match.
+func (w *WebSocketWriter) ConnectWithRetry() error {
+	if _, err := url.Parse(w.socketURL); err != nil {
+		return fmt.Errorf("invalid socket URL: %w", err)
 	}
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.dialNow = true
+	w.disconnectedAt = time.Now()
+	if !w.supervising {
+		w.supervising = true
+		go w.reconnectLoop()
+	}
+	w.triggerReconnect()
+	return nil
+}
+
+// dial opens the WebSocket. It takes no lock and is cancelled by Close.
+func (w *WebSocketWriter) dial() (*websocket.Conn, error) {
 	// Ensure URL scheme is correct (ws or wss)
 	u, err := url.Parse(w.socketURL)
 	if err != nil {
-		return fmt.Errorf("invalid socket URL: %w", err)
+		return nil, fmt.Errorf("invalid socket URL: %w", err)
 	}
 
 	switch u.Scheme {
@@ -170,26 +247,96 @@ func (w *WebSocketWriter) connectLocked() error {
 
 	conn, _, err := websocket.DefaultDialer.DialContext(w.ctx, u.String(), header)
 	if err != nil {
-		return fmt.Errorf("failed to dial websocket: %w", err)
+		return nil, fmt.Errorf("failed to dial websocket: %w", err)
 	}
+	return conn, nil
+}
 
+// installLocked makes conn the current connection (w.mu held). It does not
+// start the per-connection loops; see startLoops.
+func (w *WebSocketWriter) installLocked(conn *websocket.Conn) context.Context {
 	connCtx, connCancel := context.WithCancel(w.ctx)
 	w.conn = conn
 	w.connCancel = connCancel
 	w.connected = true
 	w.connEpoch++
+	return connCtx
+}
 
-	w.logger.Debug("WebSocket connection established, starting background routines", zap.String("url", u.String()))
-
-	// Start the per-connection routines. Both are bound to THIS conn: they act
-	// only while it is still w.conn, and exit when connCtx is cancelled (the next
-	// reconnect or Close). A loop that outlived its conn must never mark its
-	// successor disconnected or trigger a reconnect. reconnectLoop is NOT
-	// started here -- see Connect.
+// startLoops starts the per-connection routines. Both are bound to THIS conn:
+// they act only while it is still w.conn, and exit when connCtx is cancelled
+// (the next reconnect or Close). A loop that outlived its conn must never mark
+// its successor disconnected or trigger a reconnect.
+func (w *WebSocketWriter) startLoops(conn *websocket.Conn, connCtx context.Context) {
 	go w.readLoop(conn, connCtx)
 	go w.writeLoop(conn, connCtx)
+}
 
-	return nil
+// retireLocked ends the current connection and its loops (w.mu held). Cancel
+// first so the old readLoop, woken by the Close, sees it is superseded.
+func (w *WebSocketWriter) retireLocked() {
+	if w.connCancel != nil {
+		w.connCancel()
+		w.connCancel = nil
+	}
+	if w.conn != nil {
+		w.conn.Close()
+		w.conn = nil
+	}
+	w.connected = false
+}
+
+// noteDrop counts a dropped frame and logs the first one, then at most once per
+// dropLogInterval with the running total -- never per frame. The logger carries
+// the session id (agent.go gives the writer the session-scoped logger).
+func (w *WebSocketWriter) noteDrop(reason string) { w.noteDropN(1, reason) }
+
+// noteDropN counts k dropped frames at once (e.g. the rest of a spool that
+// cannot be read).
+func (w *WebSocketWriter) noteDropN(k uint64, reason string) {
+	if k == 0 {
+		return
+	}
+	w.dropMu.Lock()
+	first := w.dropped == 0
+	w.dropped += k
+	n := w.dropped
+	logIt := first || time.Since(w.lastDropLog) >= dropLogInterval
+	if logIt {
+		w.lastDropLog = time.Now()
+	}
+	w.dropMu.Unlock()
+	if logIt {
+		w.logger.Warn("Dropping frames", zap.String("reason", reason), zap.Uint64("dropped_total", n))
+	}
+}
+
+// startSpool moves frames from outgoingCh to the disk buffer until the returned
+// stop function is called (which waits for it to finish, so every frame still
+// in the channel afterwards is newer than every frame on disk).
+func (w *WebSocketWriter) startSpool() (stop func()) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		marshaler := protojson.MarshalOptions{UseProtoNames: true, UseEnumNumbers: true}
+		for {
+			select {
+			case <-w.ctx.Done():
+				return
+			case <-quit:
+				return
+			case frame := <-w.outgoingCh:
+				if err := w.bufferToDisk(frame, &marshaler); err != nil {
+					w.noteDrop("disk buffer write failed: " + err.Error())
+				}
+			}
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
 }
 
 // triggerReconnect signals that a reconnection is needed
@@ -221,8 +368,12 @@ func (w *WebSocketWriter) connLost(conn *websocket.Conn) {
 	w.triggerReconnect()
 }
 
-// reconnectLoop handles automatic reconnection with exponential backoff
+// reconnectLoop handles automatic reconnection with exponential backoff. Each
+// round retires the dead connection, spools frames to disk while it dials (see
+// ConnectWithRetry), and on success replays the spool before the live loops
+// start. Nothing here holds w.mu across a dial or a sleep.
 func (w *WebSocketWriter) reconnectLoop() {
+	defer close(w.supervisorDone)
 	delay := initialReconnectDelay
 
 	for {
@@ -230,56 +381,71 @@ func (w *WebSocketWriter) reconnectLoop() {
 		case <-w.ctx.Done():
 			return
 		case <-w.reconnectCh:
-			// Connection lost, attempt to reconnect
-			for {
+		}
+
+		w.mu.Lock()
+		if w.stopped {
+			w.mu.Unlock()
+			return
+		}
+		immediate := w.dialNow
+		w.dialNow = false
+		w.retireLocked()
+		w.mu.Unlock()
+
+		stopSpool := w.startSpool()
+
+		for {
+			if !immediate {
+				w.logger.Info("Attempting to reconnect", zap.Duration("delay", delay))
+				timer := time.NewTimer(delay)
 				select {
 				case <-w.ctx.Done():
+					timer.Stop()
+					stopSpool()
 					return
-				default:
+				case <-timer.C:
 				}
-
-				w.logger.Info("Attempting to reconnect", zap.Duration("delay", delay))
-				time.Sleep(delay)
-
-				w.mu.Lock()
-				if w.stopped {
-					w.mu.Unlock()
-					return
-				}
-
-				// Retire the old connection and its loops. Cancel first so the
-				// old readLoop, woken by the Close, sees it is superseded.
-				if w.connCancel != nil {
-					w.connCancel()
-					w.connCancel = nil
-				}
-				if w.conn != nil {
-					w.conn.Close()
-					w.conn = nil
-				}
-				w.connected = false
-
-				err := w.connectLocked()
-				w.mu.Unlock()
-
-				if err != nil {
-					w.logger.Warn("Reconnection failed", zap.Error(err), zap.Duration("next_retry", delay))
-					// Exponential backoff
-					delay = time.Duration(float64(delay) * reconnectBackoffMult)
-					if delay > maxReconnectDelay {
-						delay = maxReconnectDelay
-					}
-					continue
-				}
-
-				// Successfully reconnected
-				w.logger.Info("Successfully reconnected to WebSocket")
-				delay = initialReconnectDelay // Reset backoff
-
-				// Drain any buffered frames from disk
-				go w.drainDiskBuffer()
-				break
 			}
+			immediate = false
+
+			conn, err := w.dial()
+			if err != nil {
+				if w.ctx.Err() != nil {
+					stopSpool()
+					return
+				}
+				w.logger.Warn("Reconnection failed", zap.Error(err), zap.Duration("next_retry", delay))
+				// Exponential backoff
+				delay = time.Duration(float64(delay) * reconnectBackoffMult)
+				if delay > maxReconnectDelay {
+					delay = maxReconnectDelay
+				}
+				continue
+			}
+
+			stopSpool()
+			w.mu.Lock()
+			if w.stopped {
+				w.mu.Unlock()
+				conn.Close()
+				return
+			}
+			connCtx := w.installLocked(conn)
+			w.mu.Unlock()
+
+			w.logger.Info("Connected to WebSocket")
+			delay = initialReconnectDelay // Reset backoff
+
+			// Replay what was spooled, in order, before any live frame is sent.
+			w.drainDiskBuffer()
+
+			w.mu.Lock()
+			if w.conn == conn && w.connected {
+				w.startLoops(conn, connCtx)
+			}
+			w.mu.Unlock()
+			break
 		}
 	}
 }
@@ -301,7 +467,7 @@ func (w *WebSocketWriter) WriteFrame(frame *telemetry.LobbySessionStateFrame) er
 	case <-w.ctx.Done():
 		return w.ctx.Err()
 	default:
-		w.logger.Warn("Outgoing channel full, dropping frame")
+		w.noteDrop("outgoing channel full")
 		return fmt.Errorf("outgoing channel full")
 	}
 }
@@ -433,7 +599,7 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 				select {
 				case w.outgoingCh <- frame:
 				default:
-					w.logger.Warn("Dropping frame while superseded, buffer full")
+					w.noteDrop("superseded, buffer full")
 				}
 				return
 			}
@@ -442,14 +608,14 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 				// Check if we should switch to disk buffering
 				if !disconnectedAt.IsZero() && time.Since(disconnectedAt) > diskBufferThreshold {
 					if err := w.bufferToDisk(frame, &marshaler); err != nil {
-						w.logger.Warn("Failed to buffer frame to disk", zap.Error(err))
+						w.noteDrop("disk buffer write failed: " + err.Error())
 					}
 				} else {
 					// Still in memory buffer phase, re-queue the frame
 					select {
 					case w.outgoingCh <- frame:
 					default:
-						w.logger.Warn("Dropping frame while disconnected, buffer full")
+						w.noteDrop("disconnected, buffer full")
 					}
 				}
 				time.Sleep(100 * time.Millisecond)
@@ -465,6 +631,12 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 
 			if err := w.sendFrame(conn, frame); err != nil {
 				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
+				// Don't lose the frame in hand: spool it BEFORE connLost, so it sits
+				// ahead of anything the reconnect round spools after it, and the
+				// replay re-sends it. A failed spool write is a counted drop.
+				if serr := w.bufferToDisk(frame, &marshaler); serr != nil {
+					w.noteDrop("in-flight frame, disk buffer write failed: " + serr.Error())
+				}
 				w.connLost(conn)
 				return
 			}
@@ -574,6 +746,10 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		// this header was actually written for.
 		if w.connEpoch == epoch {
 			w.headerEpoch = epoch
+			// A header opens a new piece on the server; its footer must count
+			// its own frames, not the previous connection's.
+			w.frameCount = 0
+			w.lastTsMs = 0
 		}
 		w.mu.Unlock()
 		w.logger.Debug("Sent capture header", zap.Uint64("conn_epoch", epoch))
@@ -596,8 +772,9 @@ func (w *WebSocketWriter) sendFrame(conn *websocket.Conn, frame *telemetry.Lobby
 		// A frame that cannot be mapped is dropped rather than killing the
 		// connection: the error is per-frame (timestamp offset overflow), not
 		// per-stream, and taking the socket down would lose the whole capture.
-		w.logger.Error("Failed to map frame to v2, dropping it", zap.Error(err),
+		w.logger.Debug("Failed to map frame to v2", zap.Error(err),
 			zap.Uint32("frame_index", frame.GetFrameIndex()))
+		w.noteDrop("frame could not be mapped to v2: " + err.Error())
 		return nil
 	}
 
@@ -646,6 +823,10 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 	w.diskBufferMu.Lock()
 	defer w.diskBufferMu.Unlock()
 
+	if w.diskBytes >= maxDiskBufferBytes {
+		return fmt.Errorf("disk buffer at its %d-byte cap", maxDiskBufferBytes)
+	}
+
 	// Create disk buffer file if not exists
 	if w.diskBufferFile == nil {
 		f, err := os.CreateTemp("", "nevr-frame-buffer-*.jsonl")
@@ -656,6 +837,8 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 		w.diskBufferPath = f.Name()
 		w.usingDiskBuffer = true
 		w.diskFrameCount = 0
+		w.diskBytes = 0
+		w.drainConsumed = 0
 		w.logger.Info("Started disk buffering", zap.String("path", w.diskBufferPath))
 	}
 
@@ -680,8 +863,12 @@ func (w *WebSocketWriter) bufferToDisk(frame *telemetry.LobbySessionStateFrame, 
 	}
 
 	w.diskFrameCount++
-	if w.diskFrameCount%100 == 0 {
-		w.logger.Debug("Disk buffer progress", zap.Int64("frames_buffered", w.diskFrameCount))
+	w.diskBytes += int64(len(data)) + 1
+	if time.Since(w.diskSizeLogged) >= diskSizeLogInterval {
+		w.diskSizeLogged = time.Now()
+		w.logger.Info("Disk buffer size",
+			zap.Int64("frames_buffered", w.diskFrameCount), zap.Int64("bytes", w.diskBytes),
+			zap.Int64("cap_bytes", maxDiskBufferBytes))
 	}
 
 	return nil
@@ -706,6 +893,7 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 	f, err := os.Open(path)
 	if err != nil {
 		w.logger.Error("Failed to open disk buffer for reading", zap.Error(err))
+		w.noteDropN(w.unreplayed(0), "disk buffer unreadable")
 		w.cleanupDiskBuffer()
 		return
 	}
@@ -718,7 +906,16 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 	sentCount := int64(0)
 	batchCount := 0
 
+	w.diskBufferMu.Lock()
+	skip := w.drainConsumed
+	w.diskBufferMu.Unlock()
+	consumed := int64(0)
+
 	for scanner.Scan() {
+		if consumed < skip {
+			consumed++ // sent by an earlier, aborted drain
+			continue
+		}
 		select {
 		case <-w.ctx.Done():
 			w.logger.Warn("Context cancelled during disk buffer drain")
@@ -735,6 +932,7 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 		if !connected || conn == nil {
 			w.logger.Warn("Connection lost during disk buffer drain, aborting")
 			// Don't clean up - keep the buffer for next reconnect
+			w.keepAfterAbort(consumed)
 			return
 		}
 
@@ -747,17 +945,28 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 		// one, exactly like a live frame.
 		var buffered telemetry.Envelope
 		if err := protojson.Unmarshal(scanner.Bytes(), &buffered); err != nil {
-			w.logger.Warn("Skipping unparseable buffered frame", zap.Error(err))
+			w.logger.Debug("Skipping unparseable buffered frame", zap.Error(err))
+			w.noteDrop("unparseable buffered frame")
+			consumed++
 			continue
 		}
 		bf := buffered.GetFrame()
 		if bf == nil {
+			consumed++
 			continue
 		}
 		if err := w.sendFrame(conn, bf); err != nil {
 			w.logger.Warn("Failed to send buffered frame, will retry on next reconnect", zap.Error(err))
+			w.keepAfterAbort(consumed)
 			w.connLost(conn)
 			return
+		}
+		// "Consumed" means written to the socket, not received: there are no acks,
+		// so a frame that reaches the kernel buffer of a dying connection counts
+		// as sent here and is lost if the server never reads it.
+		consumed++
+		if w.replayHook != nil {
+			w.replayHook(consumed, conn)
 		}
 
 		sentCount++
@@ -772,10 +981,40 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 
 	if err := scanner.Err(); err != nil {
 		w.logger.Error("Error reading disk buffer", zap.Error(err))
+		w.noteDropN(w.unreplayed(consumed), "disk buffer read error: "+err.Error())
 	}
 
 	w.logger.Info("Disk buffer drained successfully", zap.Int64("frames_sent", sentCount))
 	w.cleanupDiskBuffer()
+}
+
+// unreplayed is how many spooled frames were not consumed by a replay.
+func (w *WebSocketWriter) unreplayed(consumed int64) uint64 {
+	w.diskBufferMu.Lock()
+	defer w.diskBufferMu.Unlock()
+	if n := w.diskFrameCount - consumed; n > 0 {
+		return uint64(n)
+	}
+	return 0
+}
+
+// keepAfterAbort keeps the buffer after an aborted drain: it records how many
+// lines were consumed, so the next drain resumes after them, and reopens the
+// file for appending (the drain closed its write handle) so the spool can keep
+// adding to it.
+func (w *WebSocketWriter) keepAfterAbort(consumed int64) {
+	w.diskBufferMu.Lock()
+	defer w.diskBufferMu.Unlock()
+	w.drainConsumed = consumed
+	if !w.usingDiskBuffer || w.diskBufferPath == "" {
+		return
+	}
+	f, err := os.OpenFile(w.diskBufferPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		w.logger.Warn("Failed to reopen disk buffer after aborted drain", zap.Error(err))
+		return
+	}
+	w.diskBufferFile = f
 }
 
 // cleanupDiskBuffer removes the disk buffer file and resets state
@@ -799,4 +1038,6 @@ func (w *WebSocketWriter) cleanupDiskBuffer() {
 
 	w.usingDiskBuffer = false
 	w.diskFrameCount = 0
+	w.diskBytes = 0
+	w.drainConsumed = 0
 }

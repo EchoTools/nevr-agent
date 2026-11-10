@@ -190,6 +190,10 @@ func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
+	if streamCfg.EventsStream && cfg.Agent.JWTToken != "" {
+		go watchTokenExpiry(ctx, logger, cfg.Agent.JWTToken, tokenExpiryErrorInterval)
+	}
+
 	go startAgent(ctx, logger, targets, streamCfg)
 
 	select {
@@ -206,7 +210,6 @@ func runAgent(cmd *cobra.Command, args []string, streamCfg StreamConfig) error {
 }
 
 func startAgent(ctx context.Context, logger *zap.Logger, targets map[string][]int, streamCfg StreamConfig) {
-	baseLogger := logger // Keep reference to base logger for WebSocket writer
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
@@ -325,11 +328,13 @@ OuterLoop:
 				if streamCfg.EventsStream {
 					wsURL := streamCfg.EventsURL
 					token := resolveJWTToken(streamCfg.JWTToken, cfg.Agent.JWTToken)
-					wsWriter := agent.NewWebSocketWriter(baseLogger, wsURL, token)
-					if err := wsWriter.Connect(); err != nil {
-						logger.Error("Failed to connect WebSocket writer", zap.Error(err))
+					wsWriter := agent.NewWebSocketWriter(logger, wsURL, token)
+					// A refused first dial is retried with backoff by the writer; only an
+					// unusable URL drops the writer.
+					if err := wsWriter.ConnectWithRetry(); err != nil {
+						logger.Error("Failed to start WebSocket writer", zap.Error(err))
 					} else {
-						logger.Info("WebSocket writer connected successfully", zap.String("url", wsURL))
+						logger.Info("WebSocket writer started", zap.String("url", wsURL))
 						writers = append(writers, wsWriter)
 					}
 				}
