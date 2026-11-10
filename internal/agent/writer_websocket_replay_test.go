@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -105,7 +107,9 @@ func TestWebSocketWriter_AbortedReplayResumesWithoutDuplicates(t *testing.T) {
 		t.Fatalf("got %d connections, want the aborted one plus a resume", len(pieces))
 	}
 	next := uint32(0)
+	lastFooter := false
 	for pi, p := range pieces {
+		lastFooter = false
 		if parseIngestEnvelope(t, p[0].data).GetHeader() == nil {
 			t.Fatalf("piece %d does not start with a header", pi)
 		}
@@ -119,10 +123,16 @@ func TestWebSocketWriter_AbortedReplayResumesWithoutDuplicates(t *testing.T) {
 				next++
 				n++
 			}
-			if ft := env.GetFooter(); ft != nil && ft.GetFrameCount() != n {
-				t.Errorf("piece %d footer counts %d frames, piece carried %d", pi, ft.GetFrameCount(), n)
+			if ft := env.GetFooter(); ft != nil {
+				lastFooter = true
+				if ft.GetFrameCount() != n {
+					t.Errorf("piece %d footer counts %d frames, piece carried %d", pi, ft.GetFrameCount(), n)
+				}
 			}
 		}
+	}
+	if !lastFooter {
+		t.Error("the last piece has no footer")
 	}
 	if next != frames {
 		t.Errorf("ingest received frames up to %d, want %d", next, frames)
@@ -220,3 +230,113 @@ func TestWebSocketWriter_SpoolCapDropsAndCounts(t *testing.T) {
 }
 
 var _ = telemetry.LobbySessionStateFrame{}
+
+// TestWebSocketWriter_FrameInFlightWhenConnDiesIsNotLost: a live write fails on
+// a connected conn. The frame in hand must be spooled ahead of anything newer
+// and re-sent after the reconnect: the union has no duplicate and no gap.
+func TestWebSocketWriter_FrameInFlightWhenConnDiesIsNotLost(t *testing.T) {
+	var mu sync.Mutex
+	var pieces [][]received
+	upg := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		conn, err := upg.Upgrade(rw, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		mu.Lock()
+		idx := len(pieces)
+		pieces = append(pieces, nil)
+		mu.Unlock()
+		for {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				<-release // never hang up: the client's read side stays blocked
+				return
+			}
+			mu.Lock()
+			pieces[idx] = append(pieces[idx], received{messageType: mt, data: data})
+			mu.Unlock()
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	w := NewWebSocketWriter(testLogger(t), "ws"+strings.TrimPrefix(srv.URL, "http"), "")
+	if err := w.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	base := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	send := func(i int) {
+		_ = w.WriteFrame(makeRosterFrame("sess-live", uint32(i), base.Add(time.Duration(i)*10*time.Millisecond)))
+		time.Sleep(20 * time.Millisecond)
+	}
+	for i := 0; i < 10; i++ {
+		send(i)
+	}
+	// Kill the write half only: the next live write fails while the conn still
+	// looks connected, so that frame is the one in hand.
+	w.mu.Lock()
+	tcp := w.conn.UnderlyingConn().(*net.TCPConn)
+	w.mu.Unlock()
+	if err := tcp.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 10; i < 20; i++ {
+		send(i)
+	}
+	time.Sleep(4 * time.Second) // reconnect backoff + replay
+
+	mu.Lock()
+	defer mu.Unlock()
+	next := uint32(0)
+	for pi, p := range pieces {
+		for _, m := range p {
+			if f := parseIngestEnvelope(t, m.data).GetFrame(); f != nil {
+				if f.GetFrameIndex() != next {
+					t.Fatalf("piece %d: frame_index %d, want %d (the in-flight frame was lost or duplicated)", pi, f.GetFrameIndex(), next)
+				}
+				next++
+			}
+		}
+	}
+	if next != 20 {
+		t.Errorf("ingest received frames up to %d, want 20", next)
+	}
+}
+
+// A spool line over the scanner limit aborts the drain; the frames behind it
+// are lost, and must be counted, not deleted silently.
+func TestWebSocketWriter_ScannerErrorCountsTheLostRemainder(t *testing.T) {
+	srv := newWireServer(t, 0)
+	w := NewWebSocketWriter(testLogger(t), srv.wsURL(), "")
+	if err := w.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	m := protojson.MarshalOptions{UseProtoNames: true, UseEnumNumbers: true}
+	base := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	if err := w.bufferToDisk(makeRosterFrame("sess-big", 0, base), &m); err != nil {
+		t.Fatal(err)
+	}
+	w.diskBufferMu.Lock()
+	_, _ = w.diskBufferFile.WriteString(strings.Repeat("x", 11<<20) + "\n") // over the 10 MiB limit
+	w.diskBufferMu.Unlock()
+	for i := 1; i <= 2; i++ {
+		if err := w.bufferToDisk(makeRosterFrame("sess-big", uint32(i), base), &m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w.drainDiskBuffer()
+
+	w.dropMu.Lock()
+	dropped := w.dropped
+	w.dropMu.Unlock()
+	if dropped != 2 {
+		t.Errorf("dropped_total = %d, want 2 (the frames behind the oversized line)", dropped)
+	}
+}

@@ -289,11 +289,19 @@ func (w *WebSocketWriter) retireLocked() {
 // noteDrop counts a dropped frame and logs the first one, then at most once per
 // dropLogInterval with the running total -- never per frame. The logger carries
 // the session id (agent.go gives the writer the session-scoped logger).
-func (w *WebSocketWriter) noteDrop(reason string) {
+func (w *WebSocketWriter) noteDrop(reason string) { w.noteDropN(1, reason) }
+
+// noteDropN counts k dropped frames at once (e.g. the rest of a spool that
+// cannot be read).
+func (w *WebSocketWriter) noteDropN(k uint64, reason string) {
+	if k == 0 {
+		return
+	}
 	w.dropMu.Lock()
-	w.dropped++
+	first := w.dropped == 0
+	w.dropped += k
 	n := w.dropped
-	logIt := n == 1 || time.Since(w.lastDropLog) >= dropLogInterval
+	logIt := first || time.Since(w.lastDropLog) >= dropLogInterval
 	if logIt {
 		w.lastDropLog = time.Now()
 	}
@@ -623,6 +631,12 @@ func (w *WebSocketWriter) writeLoop(conn *websocket.Conn, connCtx context.Contex
 
 			if err := w.sendFrame(conn, frame); err != nil {
 				w.logger.Warn("Failed to write message, triggering reconnect", zap.Error(err))
+				// Don't lose the frame in hand: spool it BEFORE connLost, so it sits
+				// ahead of anything the reconnect round spools after it, and the
+				// replay re-sends it. A failed spool write is a counted drop.
+				if serr := w.bufferToDisk(frame, &marshaler); serr != nil {
+					w.noteDrop("in-flight frame, disk buffer write failed: " + serr.Error())
+				}
 				w.connLost(conn)
 				return
 			}
@@ -879,6 +893,7 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 	f, err := os.Open(path)
 	if err != nil {
 		w.logger.Error("Failed to open disk buffer for reading", zap.Error(err))
+		w.noteDropN(w.unreplayed(0), "disk buffer unreadable")
 		w.cleanupDiskBuffer()
 		return
 	}
@@ -946,6 +961,9 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 			w.connLost(conn)
 			return
 		}
+		// "Consumed" means written to the socket, not received: there are no acks,
+		// so a frame that reaches the kernel buffer of a dying connection counts
+		// as sent here and is lost if the server never reads it.
 		consumed++
 		if w.replayHook != nil {
 			w.replayHook(consumed, conn)
@@ -963,10 +981,21 @@ func (w *WebSocketWriter) drainDiskBuffer() {
 
 	if err := scanner.Err(); err != nil {
 		w.logger.Error("Error reading disk buffer", zap.Error(err))
+		w.noteDropN(w.unreplayed(consumed), "disk buffer read error: "+err.Error())
 	}
 
 	w.logger.Info("Disk buffer drained successfully", zap.Int64("frames_sent", sentCount))
 	w.cleanupDiskBuffer()
+}
+
+// unreplayed is how many spooled frames were not consumed by a replay.
+func (w *WebSocketWriter) unreplayed(consumed int64) uint64 {
+	w.diskBufferMu.Lock()
+	defer w.diskBufferMu.Unlock()
+	if n := w.diskFrameCount - consumed; n > 0 {
+		return uint64(n)
+	}
+	return 0
 }
 
 // keepAfterAbort keeps the buffer after an aborted drain: it records how many
